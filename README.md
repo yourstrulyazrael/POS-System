@@ -102,7 +102,7 @@ If you wish to just develop locally and not deploy to Vercel, [follow the steps 
 
 This POS uses the Supabase project configured in `.env.local`.
 
-1. Apply all SQL migrations in `supabase/migrations` to your Supabase project, in filename order, using the Supabase SQL editor or Supabase CLI. They create the POS schema, role-based row-level security, atomic checkout, sari-sari starter products, audited stock adjustments, and live admin reporting.
+1. Apply all SQL migrations in `supabase/migrations` to your Supabase project, in filename order, using the Supabase SQL editor or Supabase CLI. They create the POS schema, role-based row-level security, atomic checkout, sari-sari starter products, audited stock adjustments, live admin reporting, and product image storage.
 2. Disable public email sign-ups in Supabase Auth settings so employees can only be created by admins.
 3. Add these server-only values to `.env.local`. Get the service-role key from your Supabase project's API settings. Generate `POS_SETUP_SECRET` as a random secret of at least 32 characters. Never expose or commit either value.
 
@@ -114,9 +114,11 @@ This POS uses the Supabase project configured in `.env.local`.
 4. Restart the development server, open `/setup-admin`, and create the first administrator using the setup key. The setup endpoint refuses to assign another first admin once one exists.
 5. Sign in as that admin. Use **Employees** to create staff login accounts; admins can manage the product catalog and import product files. Employee access is constrained by database policies, not just hidden UI.
 
-Product imports accept CSV headers `name,category,price,stock` or a JSON array of objects with those fields. A matching product name updates the existing catalog record.
+Product imports accept CSV headers `name,category,price,stock` or a JSON array of objects with those fields. Add the optional `image_icon` field to select a preset icon (`auto`, `rice`, `canned`, `noodles`, `snacks`, `eggs`, `drink`, `coffee`, `condiments`, `personal-care`, `household`, `bread`, `candy`, `frozen`, or `medicine`). A matching product name updates the existing catalog record.
 
-For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports.
+When adding an item in the admin inventory, product artwork can be auto-detected from its name/category, selected from the preset icon grid, or uploaded as a JPEG, PNG, or WebP image (up to 5 MB). Custom images are stored in the `product-images` Supabase Storage bucket.
+
+For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports; the product images migration enables preset icons and admin-only image uploads.
 
 Dark mode is available from the theme control and remembers the selected theme.
 

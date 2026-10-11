@@ -35,8 +35,9 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { ThemeSwitcher } from "@/components/theme-switcher";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import Link from "next/link";
+import Image from "next/image";
 
 type Role = "employee" | "admin";
 type Product = {
@@ -45,11 +46,13 @@ type Product = {
   category: string;
   price: number;
   stock: number;
+  imageIcon: string;
+  imageUrl: string | null;
   emoji: string;
   color: string;
 };
 type Order = { id: string; items: number; total: number; time: string };
-type ProductRow = { id: string; name: string; category: string; price: number; stock: number };
+type ProductRow = { id: string; name: string; category: string; price: number; stock: number; image_icon: string | null; image_url: string | null };
 type OrderRow = {
   id: string;
   total: number;
@@ -78,7 +81,25 @@ const sariSariCategories = [
   "Household",
 ];
 
-function productAppearance(name: string, category: string, index: number) {
+const productIcons = [
+  { id: "auto", label: "Auto", emoji: "" },
+  { id: "rice", label: "Rice", emoji: "🍚" },
+  { id: "canned", label: "Canned", emoji: "🥫" },
+  { id: "noodles", label: "Noodles", emoji: "🍜" },
+  { id: "snacks", label: "Snacks", emoji: "🍟" },
+  { id: "eggs", label: "Eggs", emoji: "🥚" },
+  { id: "drink", label: "Drink", emoji: "🥤" },
+  { id: "coffee", label: "Coffee", emoji: "☕" },
+  { id: "condiments", label: "Condiments", emoji: "🧂" },
+  { id: "personal-care", label: "Personal care", emoji: "🧴" },
+  { id: "household", label: "Household", emoji: "🧹" },
+  { id: "bread", label: "Bread", emoji: "🍞" },
+  { id: "candy", label: "Candy", emoji: "🍬" },
+  { id: "frozen", label: "Frozen", emoji: "🧊" },
+  { id: "medicine", label: "Medicine", emoji: "🩹" },
+] as const;
+
+function productAppearance(name: string, category: string, index: number, imageIcon = "auto") {
   const emojiByCategory: Record<string, string> = {
     "Rice & Grains": "🍚",
     "Canned Goods": "🥫",
@@ -106,8 +127,10 @@ function productAppearance(name: string, category: string, index: number) {
     "Laundry Detergent Sachet": "🫧",
     "Fresh Eggs (piece)": "🥚",
   };
+  const categoryEmoji = emojiByCategory[category] ?? "✨";
+  const selectedIcon = productIcons.find((icon) => icon.id === imageIcon);
   return {
-    emoji: emojiByName[name] ?? emojiByCategory[category] ?? "✨",
+    emoji: selectedIcon?.emoji || emojiByName[name] || categoryEmoji,
     color: categoryColors[index % categoryColors.length],
   };
 }
@@ -115,7 +138,7 @@ function productAppearance(name: string, category: string, index: number) {
 async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod = "today") {
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
-    supabase.from("products").select("id, name, category, price, stock").eq("active", true).order("name").returns<ProductRow[]>(),
+    supabase.from("products").select("id, name, category, price, stock, image_icon, image_url").eq("active", true).order("name").returns<ProductRow[]>(),
     supabase.from("orders").select("id, total, created_at, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
@@ -147,7 +170,9 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
     products: productsResult.data.map((product, index) => ({
       ...product,
       price: Number(product.price),
-      ...productAppearance(product.name, product.category, index),
+      imageIcon: product.image_icon ?? "auto",
+      imageUrl: product.image_url,
+      ...productAppearance(product.name, product.category, index, product.image_icon ?? "auto"),
     })),
     orders: ordersResult.data.map((order) => ({
       id: `#${order.id.slice(0, 8)}`,
@@ -221,6 +246,7 @@ function validateImportedProducts(value: unknown[]) {
     const category = typeof item.category === "string" ? item.category.trim() : "";
     const price = Number(item.price);
     const stock = Number(item.stock);
+    const imageIcon = typeof item.image_icon === "string" ? item.image_icon.trim() : "auto";
     if (
       !name ||
       name.length > 120 ||
@@ -229,11 +255,12 @@ function validateImportedProducts(value: unknown[]) {
       !Number.isFinite(price) ||
       price <= 0 ||
       !Number.isInteger(stock) ||
-      stock < 0
+      stock < 0 ||
+      !productIcons.some((icon) => icon.id === imageIcon)
     ) {
       throw new Error(`Product row ${index + 1} needs a name, category, positive price, and non-negative whole-number stock.`);
     }
-    return { name, category, price, stock };
+    return { name, category, price, stock, image_icon: imageIcon };
   });
 }
 
@@ -255,6 +282,8 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [activePage, setActivePage] = useState<"dashboard" | "pos" | "inventory" | "orders" | "employees">("pos");
   const [showAddProduct, setShowAddProduct] = useState(false);
+  const [selectedProductIcon, setSelectedProductIcon] = useState("auto");
+  const [selectedProductImage, setSelectedProductImage] = useState<File | null>(null);
   const [notice, setNotice] = useState("");
   const [authError, setAuthError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -460,23 +489,64 @@ export default function Home() {
     const price = Number(formData.get("price"));
     const stock = Number(formData.get("stock"));
     const selectedCategory = String(formData.get("category") ?? sariSariCategories[0]);
+    if (selectedProductImage && (
+      !["image/jpeg", "image/png", "image/webp"].includes(selectedProductImage.type) ||
+      selectedProductImage.size > 5 * 1024 * 1024
+    )) {
+      setNotice("Choose a JPEG, PNG, or WebP image that is no larger than 5 MB.");
+      return;
+    }
     if (!name || !Number.isFinite(price) || price <= 0 || !Number.isInteger(stock) || stock < 0) {
       setNotice("Enter a product name, a price above ₱0, and a valid stock quantity.");
       return;
     }
+    let uploadedPath: string | null = null;
+    let productCreated = false;
     try {
       const supabase = createClient();
+      let imageUrl: string | null = null;
+      if (selectedProductImage) {
+        const extensionByType: Record<string, string> = {
+          "image/jpeg": "jpg",
+          "image/png": "png",
+          "image/webp": "webp",
+        };
+        uploadedPath = `${crypto.randomUUID()}.${extensionByType[selectedProductImage.type]}`;
+        const { error: uploadError } = await supabase.storage
+          .from("product-images")
+          .upload(uploadedPath, selectedProductImage, {
+            contentType: selectedProductImage.type,
+            cacheControl: "3600",
+            upsert: false,
+          });
+        if (uploadError) throw new Error(`Unable to upload product image: ${uploadError.message}`);
+        imageUrl = supabase.storage.from("product-images").getPublicUrl(uploadedPath).data.publicUrl;
+      }
       const { error } = await supabase.from("products").insert({
         name,
         category: selectedCategory,
         price,
         stock,
+        image_icon: selectedProductIcon,
+        image_url: imageUrl,
       });
       if (error) throw error;
-      await refreshWorkspace();
+      productCreated = true;
       setShowAddProduct(false);
+      setSelectedProductIcon("auto");
+      setSelectedProductImage(null);
       setNotice(`${name} added to inventory.`);
+      try {
+        await refreshWorkspace();
+      } catch (error) {
+        setNotice(`${name} was added, but the catalog could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
     } catch (error) {
+      if (uploadedPath && !productCreated) {
+        const supabase = createClient();
+        const { error: cleanupError } = await supabase.storage.from("product-images").remove([uploadedPath]);
+        if (cleanupError) console.error("Unable to remove an unused product image:", cleanupError.message);
+      }
       setNotice(error instanceof Error ? error.message : "Unable to add product.");
     }
   }
@@ -841,7 +911,7 @@ export default function Home() {
             ) : currentView === "inventory" && isAdmin ? (
               <InventoryView
                 products={products}
-                onAdd={() => setShowAddProduct(true)}
+                onAdd={() => { setSelectedProductIcon("auto"); setSelectedProductImage(null); setShowAddProduct(true); }}
                 onRemove={removeProduct}
                 onImport={importProducts}
                 isImporting={isImporting}
@@ -879,7 +949,7 @@ export default function Home() {
                         const unavailable = product.stock <= (cart[product.id] ?? 0);
                         return (
                           <button type="button" key={product.id} disabled={unavailable} onClick={() => addToCart(product)} className={`group relative rounded-2xl border border-slate-100 bg-white p-3 text-left shadow-[0_2px_10px_rgba(20,45,90,0.025)] transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 sm:p-4`}>
-                            <div className={`mb-3 grid aspect-[1.6/1] place-items-center rounded-xl text-[42px] ${product.color} transition-transform group-hover:scale-[1.015]`}>{product.emoji}</div>
+                            <ProductArtwork product={product} className={`mb-3 aspect-[1.6/1] rounded-xl text-[42px] transition-transform group-hover:scale-[1.015]`} />
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-semibold text-slate-800">{product.name}</p>
@@ -919,20 +989,26 @@ export default function Home() {
       </div>
 
       {showAddProduct && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) setShowAddProduct(false); }}>
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); } }}>
           <div role="dialog" aria-modal="true" aria-labelledby="add-product-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <div className="mb-5 flex items-start justify-between">
               <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="add-product-title" className="mt-1 text-xl font-semibold">Add a product</h2></div>
-              <button type="button" aria-label="Close dialog" onClick={() => setShowAddProduct(false)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
+              <button type="button" aria-label="Close dialog" onClick={() => { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
             </div>
-            <form onSubmit={addProduct} className="space-y-4">
+            <form onSubmit={addProduct} className="max-h-[80vh] space-y-4 overflow-y-auto pr-1">
               <label className="block text-sm font-medium text-slate-700">Product name<input required name="name" placeholder="e.g. Sardines (155 g)" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block text-sm font-medium text-slate-700">Price (₱)<input required name="price" type="number" min="0.01" step="0.01" placeholder="25.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
                 <label className="block text-sm font-medium text-slate-700">Stock<input required name="stock" type="number" min="0" step="1" placeholder="12" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               </div>
               <label className="block text-sm font-medium text-slate-700">Category<select name="category" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50">{categories.filter((item) => item !== "All items").map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
-              <div className="flex gap-3 pt-2"><button type="button" onClick={() => setShowAddProduct(false)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add product</button></div>
+              <ProductImagePicker
+                selectedIcon={selectedProductIcon}
+                selectedImage={selectedProductImage}
+                onIconChange={setSelectedProductIcon}
+                onImageChange={setSelectedProductImage}
+              />
+              <div className="flex gap-3 pt-2"><button type="button" onClick={() => { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add product</button></div>
             </form>
           </div>
         </div>
@@ -1035,7 +1111,7 @@ function AdminOverview({
       <div className="mt-6 grid gap-4 xl:grid-cols-2">
         <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Low stock</h2><p className="mt-1 text-xs text-slate-400">Products with 5 or fewer units</p></div><button type="button" onClick={onViewInventory} className="text-xs font-semibold text-blue-600 hover:text-blue-700">Manage inventory <ArrowRight size={13} className="ml-1 inline" /></button></div>
-          {lowStockProducts.length ? <div className="divide-y divide-slate-100">{lowStockProducts.slice(0, 5).map((product) => <div key={product.id} className="flex items-center justify-between gap-3 px-5 py-3"><div className="flex min-w-0 items-center gap-3"><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg text-lg ${product.color}`}>{product.emoji}</span><div className="min-w-0"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{product.category}</p></div></div><span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-semibold text-amber-700">{product.stock} left</span></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No products need restocking.</div>}
+          {lowStockProducts.length ? <div className="divide-y divide-slate-100">{lowStockProducts.slice(0, 5).map((product) => <div key={product.id} className="flex items-center justify-between gap-3 px-5 py-3"><div className="flex min-w-0 items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><div className="min-w-0"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{product.category}</p></div></div><span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-semibold text-amber-700">{product.stock} left</span></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No products need restocking.</div>}
         </div>
         <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Recent sales</h2><p className="mt-1 text-xs text-slate-400">Latest completed transactions</p></div><button type="button" onClick={onViewOrders} className="text-xs font-semibold text-blue-600 hover:text-blue-700">All orders <ArrowRight size={13} className="ml-1 inline" /></button></div>
@@ -1050,6 +1126,93 @@ function periodLabel(period: SalesPeriod) {
   if (period === "7days") return "Last 7 days";
   if (period === "30days") return "Last 30 days";
   return "Today · Asia/Manila";
+}
+
+function ProductArtwork({ product, className = "" }: { product: Product; className?: string }) {
+  return (
+    <div className={`relative grid shrink-0 place-items-center overflow-hidden ${product.color} ${className}`}>
+      {product.imageUrl ? (
+        <Image
+          src={product.imageUrl}
+          alt={product.name}
+          fill
+          unoptimized
+          sizes="(max-width: 640px) 45vw, 220px"
+          className="object-cover"
+        />
+      ) : (
+        <span aria-hidden="true">{product.emoji}</span>
+      )}
+    </div>
+  );
+}
+
+function ProductImagePicker({
+  selectedIcon,
+  selectedImage,
+  onIconChange,
+  onImageChange,
+}: {
+  selectedIcon: string;
+  selectedImage: File | null;
+  onIconChange: (icon: string) => void;
+  onImageChange: (image: File | null) => void;
+}) {
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!selectedImage) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(selectedImage);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [selectedImage]);
+
+  return (
+    <fieldset className="space-y-2">
+      <legend className="text-sm font-medium text-slate-700">Product image or icon</legend>
+      <div className="flex items-start gap-3">
+        <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-xl bg-blue-50 text-3xl">
+          {previewUrl ? <Image src={previewUrl} alt="Selected product image preview" width={64} height={64} unoptimized className="h-full w-full object-cover" /> : productIcons.find((icon) => icon.id === selectedIcon)?.emoji || "✨"}
+        </div>
+        <div className="min-w-0 flex-1">
+          <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700">
+            <FileUp size={14} /> Choose custom image
+            <input
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              className="sr-only"
+              onChange={(event: ChangeEvent<HTMLInputElement>) => onImageChange(event.currentTarget.files?.[0] ?? null)}
+            />
+          </label>
+          {selectedImage ? (
+            <button type="button" onClick={() => onImageChange(null)} className="ml-2 text-xs font-medium text-red-500 hover:text-red-700">Remove image</button>
+          ) : (
+            <p className="mt-1.5 text-[11px] text-slate-400">JPEG, PNG or WebP · max 5 MB</p>
+          )}
+        </div>
+      </div>
+      <p className="pt-1 text-xs font-medium text-slate-500">Or choose a preset icon</p>
+      <div className="grid grid-cols-5 gap-2">
+        {productIcons.map((icon) => (
+          <button
+            type="button"
+            key={icon.id}
+            aria-label={`${icon.label} icon`}
+            aria-pressed={!selectedImage && selectedIcon === icon.id}
+            onClick={() => { onIconChange(icon.id); onImageChange(null); }}
+            className={`flex h-14 flex-col items-center justify-center rounded-lg border text-[20px] transition ${!selectedImage && selectedIcon === icon.id ? "border-blue-500 bg-blue-50 ring-2 ring-blue-100" : "border-slate-100 bg-white hover:border-blue-200"}`}
+          >
+            <span>{icon.emoji || "✨"}</span>
+            <span className="mt-0.5 text-[9px] font-medium text-slate-500">{icon.label}</span>
+          </button>
+        ))}
+      </div>
+      <p className="text-[11px] leading-4 text-slate-400">Auto follows the product category and name. A custom image takes priority over the selected preset.</p>
+    </fieldset>
+  );
 }
 
 function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, onCheckout, onClear, isProcessing }: {
@@ -1073,7 +1236,7 @@ function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, o
       <div className="flex items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px]"><span className="text-slate-500">Customer</span><button type="button" className="flex items-center gap-1 font-semibold text-blue-700">Walk-in customer <ChevronDown size={13} /></button></div>
       <div className="max-h-[330px] min-h-[180px] overflow-y-auto px-5">
         {items.length > 0 ? <ul className="divide-y divide-slate-100">{items.map((product) => <li key={product.id} className="flex items-center gap-3 py-4">
-          <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-xl text-xl ${product.color}`}>{product.emoji}</div>
+          <ProductArtwork product={product} className="h-11 w-11 rounded-xl text-xl" />
           <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-1 text-[11px] text-slate-400">{money(product.price)} each</p><div className="mt-2 flex items-center gap-2"><button type="button" aria-label={`Remove one ${product.name}`} onClick={() => onChange(product.id, -1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Minus size={12} /></button><span className="w-4 text-center text-xs font-semibold">{quantities[product.id]}</span><button type="button" aria-label={`Add one ${product.name}`} onClick={() => onChange(product.id, 1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Plus size={12} /></button></div></div>
           <div className="flex h-full flex-col items-end justify-between gap-4"><button type="button" aria-label={`Remove ${product.name} from order`} onClick={() => onChange(product.id, -quantities[product.id])} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button><span className="text-xs font-semibold">{money(product.price * quantities[product.id])}</span></div>
         </li>)}</ul> : <div className="flex min-h-[180px] flex-col items-center justify-center text-center"><div className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-500"><ShoppingCart size={20} /></div><p className="mt-3 text-xs font-semibold text-slate-700">Your order is empty</p><p className="mt-1 text-[11px] text-slate-400">Add a product to get started.</p></div>}
@@ -1113,7 +1276,7 @@ function InventoryView({ products, onAdd, onRemove, onImport, isImporting, onRes
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><span className={`grid h-9 w-9 place-items-center rounded-lg text-lg ${product.color}`}>{product.emoji}</span><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
       </div>
     </section>
   );
