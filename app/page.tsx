@@ -53,7 +53,8 @@ type Product = {
   emoji: string;
   color: string;
 };
-type Order = { id: string; items: number; total: number; time: string; paymentMethod: "cash" | "gcash"; gcashReferenceLast4: string | null };
+type Order = { id: string; items: number; total: number; time: string; paymentMethod: "cash" | "gcash"; gcashReferenceLast4: string | null; employeeName: string };
+type SalesChartPoint = { label: string; cash: number; gcash: number };
 type ProductRow = { id: string; name: string; category: string; price: number; stock: number; image_icon: string | null; image_url: string | null };
 type OrderRow = {
   id: string;
@@ -62,6 +63,7 @@ type OrderRow = {
   order_items: { quantity: number }[];
   payment_method: "cash" | "gcash";
   gcash_reference_last4: string | null;
+  employee_name: string;
   employee_id?: string | null;
 };
 type Employee = { id: string; email: string; full_name: string; role: "employee" };
@@ -143,14 +145,19 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
     supabase.from("products").select("id, name, category, price, stock, image_icon, image_url").eq("active", true).order("name").returns<ProductRow[]>(),
-    supabase.from("orders").select("id, total, created_at, payment_method, gcash_reference_last4, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
+    supabase.from("orders").select("id, total, created_at, payment_method, gcash_reference_last4, employee_name, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
   if (ordersResult.error) throw new Error(`Unable to load orders: ${ordersResult.error.message}`);
   let stats: DashboardStats | null = null;
+  let salesChart: SalesChartPoint[] = [];
   if (includeAdminStats) {
-    const { data, error } = await supabase.rpc("get_admin_dashboard_stats", { p_period: period }).single();
+    const [{ data, error }, { data: chartRows, error: chartError }] = await Promise.all([
+      supabase.rpc("get_admin_dashboard_stats", { p_period: period }).single(),
+      supabase.rpc("get_admin_sales_chart", { p_period: period }),
+    ]);
     if (error) throw new Error(`Unable to load store summary: ${error.message}`);
+    if (chartError) throw new Error(`Unable to load sales chart: ${chartError.message}`);
     if (
       !data ||
       typeof data !== "object" ||
@@ -169,6 +176,11 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       units_in_stock: Number(data.units_in_stock),
       active_employees: Number(data.active_employees),
     };
+    salesChart = (chartRows ?? []).map((row: { bucket_label: string; cash_total: number | string; gcash_total: number | string }) => ({
+      label: String(row.bucket_label),
+      cash: Number(row.cash_total),
+      gcash: Number(row.gcash_total),
+    }));
   }
   return {
     products: productsResult.data.map((product, index) => ({
@@ -185,8 +197,10 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       time: new Date(order.created_at).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
       paymentMethod: order.payment_method,
       gcashReferenceLast4: order.gcash_reference_last4,
+      employeeName: order.employee_name || "Former employee",
     })),
     stats,
+    salesChart,
   };
 }
 
@@ -279,6 +293,7 @@ export default function Home() {
   const [cart, setCart] = useState<Record<string, number>>({});
   const [orders, setOrders] = useState<Order[]>([]);
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
+  const [salesChart, setSalesChart] = useState<SalesChartPoint[]>([]);
   const [salesPeriod, setSalesPeriod] = useState<SalesPeriod>("today");
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -367,6 +382,7 @@ export default function Home() {
         setProducts(workspace.products);
         setOrders(workspace.orders);
         setDashboardStats(workspace.stats);
+        setSalesChart(workspace.salesChart);
         setLastRefreshedAt(new Date());
         if (profile.role === "admin") setActivePage("dashboard");
         setSignedIn(true);
@@ -385,6 +401,7 @@ export default function Home() {
     setProducts(workspace.products);
     setOrders(workspace.orders);
     setDashboardStats(workspace.stats);
+    setSalesChart(workspace.salesChart);
     setLastRefreshedAt(new Date());
   }, [role, salesPeriod]);
 
@@ -496,6 +513,7 @@ export default function Home() {
       setProducts(workspace.products);
       setOrders(workspace.orders);
       setDashboardStats(workspace.stats);
+      setSalesChart(workspace.salesChart);
       setLastRefreshedAt(new Date());
       setActivePage(profile.role === "admin" ? "dashboard" : "pos");
       setSignedIn(true);
@@ -1126,6 +1144,7 @@ export default function Home() {
                 stats={dashboardStats}
                 products={products}
                 orders={orders}
+                salesChart={salesChart}
                 period={salesPeriod}
                 lastRefreshedAt={lastRefreshedAt}
                 isRefreshing={isRefreshing}
@@ -1321,6 +1340,7 @@ function AdminOverview({
   stats,
   products,
   orders,
+  salesChart,
   period,
   lastRefreshedAt,
   isRefreshing,
@@ -1332,6 +1352,7 @@ function AdminOverview({
   stats: DashboardStats;
   products: Product[];
   orders: Order[];
+  salesChart: SalesChartPoint[];
   period: SalesPeriod;
   lastRefreshedAt: Date | null;
   isRefreshing: boolean;
@@ -1362,6 +1383,7 @@ function AdminOverview({
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {cards.map(({ label, value, detail, icon: Icon, color }) => <div key={label} className="rounded-2xl border border-slate-100 bg-white p-4"><div className="flex items-center justify-between"><span className="text-xs font-medium text-slate-500">{label}</span><span className={`grid h-8 w-8 place-items-center rounded-lg ${color}`}><Icon size={16} /></span></div><p className="mt-3 text-2xl font-semibold tracking-tight">{value}</p><p className="mt-1 text-[10px] text-slate-400">{detail}</p></div>)}
       </div>
+      <SalesChartView rows={salesChart} period={period} />
       <div className="mt-6 grid gap-4 xl:grid-cols-2">
         <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Low stock</h2><p className="mt-1 text-xs text-slate-400">Products with 5 or fewer units</p></div><button type="button" onClick={onViewInventory} className="text-xs font-semibold text-blue-600 hover:text-blue-700">Manage inventory <ArrowRight size={13} className="ml-1 inline" /></button></div>
@@ -1369,7 +1391,7 @@ function AdminOverview({
         </div>
         <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Recent sales</h2><p className="mt-1 text-xs text-slate-400">Latest completed transactions</p></div><button type="button" onClick={onViewOrders} className="text-xs font-semibold text-blue-600 hover:text-blue-700">All orders <ArrowRight size={13} className="ml-1 inline" /></button></div>
-          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time}</p></div><p className="text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
+          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName} · {order.paymentMethod === "gcash" ? "GCash" : "Cash"}</p></div><p className="text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
         </div>
       </div>
     </section>
@@ -1380,6 +1402,64 @@ function periodLabel(period: SalesPeriod) {
   if (period === "7days") return "Last 7 days";
   if (period === "30days") return "Last 30 days";
   return "Today · Asia/Manila";
+}
+
+function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: SalesPeriod }) {
+  const [paymentFilter, setPaymentFilter] = useState<"all" | "cash" | "gcash">("all");
+  const visibleAmounts = rows.map((row) => ({
+    ...row,
+    cash: paymentFilter === "gcash" ? 0 : row.cash,
+    gcash: paymentFilter === "cash" ? 0 : row.gcash,
+  }));
+  const maxTotal = Math.max(1, ...visibleAmounts.map((row) => row.cash + row.gcash));
+  const showLabel = (index: number) => {
+    if (rows.length <= 7) return true;
+    const interval = rows.length <= 24 ? 4 : 5;
+    return index % interval === 0 || index === rows.length - 1;
+  };
+
+  return (
+    <section aria-label="Sales chart" className="mt-6 overflow-hidden rounded-2xl border border-slate-100 bg-white">
+      <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center">
+        <div><h2 className="text-sm font-semibold">Sales by payment method</h2><p className="mt-1 text-xs text-slate-400">{periodLabel(period)} · PHP</p></div>
+        <div className="flex gap-1 rounded-lg bg-slate-50 p-1" aria-label="Filter sales chart by payment method">
+          {(["all", "cash", "gcash"] as const).map((method) => (
+            <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+              {method === "all" ? "All" : method === "gcash" ? "GCash" : "Cash"}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="px-4 py-4 sm:px-5">
+        <div className="mb-3 flex items-center gap-4 text-[10px] text-slate-500">
+          {(paymentFilter === "all" || paymentFilter === "cash") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-blue-500" />Cash</span>}
+          {(paymentFilter === "all" || paymentFilter === "gcash") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-violet-500" />GCash</span>}
+        </div>
+        {rows.length ? (
+          <div className="relative">
+            <div className="pointer-events-none absolute inset-x-0 top-0 flex h-36 flex-col justify-between" aria-hidden="true">
+              {[0, 1, 2, 3].map((line) => <div key={line} className="border-t border-dashed border-slate-100" />)}
+            </div>
+            <div className="relative flex h-36 items-end gap-1">
+              {visibleAmounts.map((row, index) => {
+                const cashHeight = row.cash / maxTotal * 100;
+                const gcashHeight = row.gcash / maxTotal * 100;
+                return (
+                  <div key={`${row.label}-${index}`} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={`${row.label}: Cash ${money(row.cash)} · GCash ${money(row.gcash)}`}>
+                    <div className="flex h-full items-end justify-center gap-[2px]">
+                      {(paymentFilter === "all" || paymentFilter === "cash") && <div className="w-1/2 max-w-5 rounded-t bg-blue-500 transition-[height]" style={{ height: `${cashHeight}%` }} />}
+                      {(paymentFilter === "all" || paymentFilter === "gcash") && <div className="w-1/2 max-w-5 rounded-t bg-violet-500 transition-[height]" style={{ height: `${gcashHeight}%` }} />}
+                    </div>
+                    <span className={`mt-2 h-3 truncate text-center text-[8px] text-slate-400 sm:text-[9px] ${showLabel(index) ? "" : "invisible"}`}>{row.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : <div className="grid h-36 place-items-center text-xs text-slate-400">No sales recorded for this period.</div>}
+      </div>
+    </section>
+  );
 }
 
 function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
@@ -1693,13 +1773,20 @@ function AccountView({
 }
 
 function OrdersView({ orders }: { orders: Order[] }) {
+  const [paymentFilter, setPaymentFilter] = useState<"all" | "cash" | "gcash">("all");
+  const visibleOrders = orders.filter((order) => paymentFilter === "all" || order.paymentMethod === paymentFilter);
   return (
     <section>
       <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Orders</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Recent orders</h1><p className="mt-1 text-sm text-slate-500">A quick look at your latest transactions.</p></div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Order history</h2><p className="mt-1 text-xs text-slate-400">{orders.length} recent transactions</p></div><span className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[11px] font-medium text-emerald-700"><Check size={13} /> All up to date</span></div>
-        <div className="divide-y divide-slate-100">{orders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p><p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">{order.paymentMethod === "gcash" ? `GCash · Ref •••• ${order.gcashReferenceLast4 ?? "—"}` : "Cash"}</p></div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
-        {orders.length === 0 && <div className="py-16 text-center text-sm text-slate-400">No orders yet. Completed sales will show up here.</div>}
+        <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center">
+          <div><h2 className="text-sm font-semibold">Order history</h2><p className="mt-1 text-xs text-slate-400">Showing {visibleOrders.length} of {orders.length} recent transactions</p></div>
+          <div className="flex gap-1 rounded-lg bg-slate-50 p-1" aria-label="Filter orders by payment method">
+            {(["all", "cash", "gcash"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : method === "gcash" ? "GCash" : "Cash"}</button>)}
+          </div>
+        </div>
+        <div className="divide-y divide-slate-100">{visibleOrders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div className="min-w-0"><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p><p className="mt-1 text-xs font-medium text-slate-600">{order.employeeName}</p><p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">{order.paymentMethod === "gcash" ? `GCash · Ref •••• ${order.gcashReferenceLast4 ?? "—"}` : "Cash"}</p></div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
+        {visibleOrders.length === 0 && <div className="py-16 text-center text-sm text-slate-400">{orders.length ? `No ${paymentFilter === "gcash" ? "GCash" : "cash"} orders in the recent transactions.` : "No orders yet. Completed sales will show up here."}</div>}
       </div>
     </section>
   );

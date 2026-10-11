@@ -122,6 +122,8 @@ Checkout supports Cash and GCash and charges the product subtotal without VAT. F
 
 For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports; the product images migration enables preset icons and admin-only image uploads; the payment migration stores the payment method and GCash reference digits with each order; the account tools migration disables VAT for new orders; and the account-name/reset migration synchronizes profile names and adds an atomic admin sales-history reset used by the server API.
 
+Migration `202610120005_sales_chart_employee.sql` adds Cash/GCash sales charts and payment filters, and saves an employee-name snapshot with each new order so attribution remains available if an employee account is later removed. Apply all pending migrations in filename order.
+
 The **Account** panel lets each signed-in user request an email change or set a new password. Admins can also permanently delete order and order-item history there; this does not reset products, stock, employee accounts, or stock movement history. Dark mode is available from the theme control and remembers the selected theme.
 
 ## Feedback and issues
