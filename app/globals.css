@@ -66,3 +66,85 @@
     @apply bg-background text-foreground;
   }
 }
+
+html.dark body {
+  background-color: #0b1220;
+}
+
+html.dark [class~="bg-white"] {
+  background-color: #111c31;
+}
+
+html.dark [class~="bg-slate-50"],
+html.dark [class~="bg-slate-50/70"],
+html.dark [class~="bg-slate-50/80"],
+html.dark [class~="bg-slate-100"] {
+  background-color: #1b2940;
+}
+
+html.dark [class~="bg-blue-50"] {
+  background-color: #14284a;
+}
+
+html.dark [class~="bg-emerald-50"],
+html.dark [class~="bg-green-50"] {
+  background-color: #15332d;
+}
+
+html.dark [class~="bg-amber-50"],
+html.dark [class~="bg-yellow-50"] {
+  background-color: #382d1b;
+}
+
+html.dark [class~="bg-violet-50"] {
+  background-color: #2a2444;
+}
+
+html.dark [class~="bg-rose-50"],
+html.dark [class~="bg-pink-50"] {
+  background-color: #3b2432;
+}
+
+html.dark [class~="bg-sky-50"] {
+  background-color: #172c43;
+}
+
+html.dark [class~="border-slate-100"],
+html.dark [class~="border-slate-200"] {
+  border-color: #293750;
+}
+
+html.dark [class~="text-slate-900"],
+html.dark [class~="text-slate-800"],
+html.dark [class~="text-slate-700"],
+html.dark [class~="text-slate-600"] {
+  color: #e2e8f0;
+}
+
+html.dark [class~="text-slate-500"],
+html.dark [class~="text-slate-400"] {
+  color: #9aabc2;
+}
+
+html.dark [class~="text-slate-300"] {
+  color: #64748b;
+}
+
+html.dark [class~="text-emerald-700"],
+html.dark [class~="text-emerald-600"] {
+  color: #6ee7b7;
+}
+
+html.dark [class~="text-amber-700"],
+html.dark [class~="text-amber-600"] {
+  color: #fcd34d;
+}
+
+html.dark [class~="hover:bg-slate-50"]:hover {
+  background-color: #1b2940;
+}
+
+html.dark input,
+html.dark select {
+  color: #e2e8f0;
+}

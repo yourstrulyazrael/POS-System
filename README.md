@@ -98,6 +98,28 @@ If you wish to just develop locally and not deploy to Vercel, [follow the steps 
 
 > Check out [the docs for Local Development](https://supabase.com/docs/guides/getting-started/local-development) to also run Supabase locally.
 
+## POS database and first admin
+
+This POS uses the Supabase project configured in `.env.local`.
+
+1. Apply [`supabase/migrations/202610110001_pos_database.sql`](./supabase/migrations/202610110001_pos_database.sql) to your Supabase project using the Supabase SQL editor. It creates the staff profiles, products, orders and order items tables, role-based row-level security, atomic checkout, and starter products.
+2. Disable public email sign-ups in Supabase Auth settings so employees can only be created by admins.
+3. Add these server-only values to `.env.local`. Get the service-role key from your Supabase project's API settings. Generate `POS_SETUP_SECRET` as a random secret of at least 32 characters. Never expose or commit either value.
+
+   ```env
+   SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+   POS_SETUP_SECRET=your_random_one_time_setup_key
+   ```
+
+4. Restart the development server, open `/setup-admin`, and create the first administrator using the setup key. The setup endpoint refuses to assign another first admin once one exists.
+5. Sign in as that admin. Use **Employees** to create staff login accounts; admins can manage the product catalog and import product files. Employee access is constrained by database policies, not just hidden UI.
+
+Product imports accept CSV headers `name,category,price,stock` or a JSON array of objects with those fields. A matching product name updates the existing catalog record.
+
+For databases that already applied the original POS migration, also apply [`supabase/migrations/202610110002_sari_sari_catalog.sql`](./supabase/migrations/202610110002_sari_sari_catalog.sql) to replace the original café demo products with sari-sari store stock. It deactivates only the original demo items and keeps their order history intact.
+
+Dark mode is available from the theme control and remembers the selected theme.
+
 ## Feedback and issues
 
 Please file feedback and issues over on the [Supabase GitHub org](https://github.com/supabase/supabase/issues/new/choose).
