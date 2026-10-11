@@ -296,6 +296,7 @@ export default function Home() {
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "gcash">("cash");
   const [gcashReferenceLast4, setGcashReferenceLast4] = useState("");
   const [accountEmail, setAccountEmail] = useState("");
+  const [accountName, setAccountName] = useState("");
   const [salesResetConfirmation, setSalesResetConfirmation] = useState("");
   const [notice, setNotice] = useState("");
   const [authError, setAuthError] = useState("");
@@ -361,6 +362,7 @@ export default function Home() {
         if (cancelled) return;
         setRole(profile.role);
         setEmployeeName(profile.full_name || user.email || "Team member");
+        setAccountName(profile.full_name || "");
         setAccountEmail(user.email ?? "");
         setProducts(workspace.products);
         setOrders(workspace.orders);
@@ -489,6 +491,7 @@ export default function Home() {
       }
       const workspace = await fetchWorkspaceData(profile.role === "admin", salesPeriod);
       setEmployeeName(profile.full_name || authData.user.email || "Team member");
+      setAccountName(profile.full_name || "");
       setAccountEmail(authData.user.email ?? "");
       setProducts(workspace.products);
       setOrders(workspace.orders);
@@ -764,6 +767,29 @@ export default function Home() {
     }
   }
 
+  async function updateAccountName(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const fullName = String(formData.get("fullName") ?? "").trim();
+    if (!fullName || fullName.length > 100) {
+      setNotice("Enter a name with 1 to 100 characters.");
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.updateUser({ data: { full_name: fullName } });
+      if (error) throw error;
+      setAccountName(fullName);
+      setEmployeeName(fullName);
+      setNotice("Your account name was updated.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Unable to update account name.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function resetSalesHistory(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (role !== "admin" || salesResetConfirmation !== "RESET SALES HISTORY") {
@@ -772,15 +798,20 @@ export default function Home() {
     }
     setIsLoading(true);
     try {
-      const supabase = createClient();
-      const { data, error } = await supabase.rpc("reset_sales_history", {
-        p_confirmation: salesResetConfirmation,
+      const response = await fetch("/api/admin/reset-sales-history", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation: salesResetConfirmation }),
       });
-      if (error) throw error;
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error ?? "Unable to reset sales history.");
+      if (!Number.isSafeInteger(result.deletedOrders) || result.deletedOrders < 0) {
+        throw new Error("Sales history was reset, but the server returned an invalid order count.");
+      }
       setOrders([]);
       setDashboardStats((current) => current ? { ...current, sales_total: 0, orders_today: 0 } : current);
       setSalesResetConfirmation("");
-      setNotice(`${Number(data)} sales order${Number(data) === 1 ? "" : "s"} and their item history permanently deleted. Products, stock, employees, and stock movements were not changed.`);
+      setNotice(`${result.deletedOrders} sales order${result.deletedOrders === 1 ? "" : "s"} and their item history permanently deleted. Products, stock, employees, and stock movements were not changed.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Unable to reset sales history.");
     } finally {
@@ -1112,12 +1143,14 @@ export default function Home() {
             ) : currentView === "account" ? (
               <AccountView
                 email={accountEmail}
+                name={accountName}
                 role={role}
                 isProcessing={isLoading}
                 salesResetConfirmation={salesResetConfirmation}
                 onSalesResetConfirmationChange={setSalesResetConfirmation}
                 onUpdateEmail={updateAccountEmail}
                 onUpdatePassword={updateAccountPassword}
+                onUpdateName={updateAccountName}
                 onResetSalesHistory={resetSalesHistory}
               />
             ) : currentView === "inventory" && isAdmin ? (
@@ -1605,27 +1638,36 @@ function EmployeeView({ employees, onAdd, onRemove }: {
 
 function AccountView({
   email,
+  name,
   role,
   isProcessing,
   salesResetConfirmation,
   onSalesResetConfirmationChange,
   onUpdateEmail,
   onUpdatePassword,
+  onUpdateName,
   onResetSalesHistory,
 }: {
   email: string;
+  name: string;
   role: Role;
   isProcessing: boolean;
   salesResetConfirmation: string;
   onSalesResetConfirmationChange: (value: string) => void;
   onUpdateEmail: (event: FormEvent<HTMLFormElement>) => void;
   onUpdatePassword: (event: FormEvent<HTMLFormElement>) => void;
+  onUpdateName: (event: FormEvent<HTMLFormElement>) => void;
   onResetSalesHistory: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
     <section className="mx-auto max-w-3xl">
       <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Account</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Account settings</h1><p className="mt-1 text-sm text-slate-500">Manage your sign-in details and store history.</p></div>
       <div className="space-y-5">
+        <form onSubmit={onUpdateName} className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+          <div className="mb-4"><h2 className="text-sm font-semibold">Account name</h2><p className="mt-1 text-xs leading-5 text-slate-500">This name appears in the POS workspace and account profile.</p></div>
+          <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">Full name<input required maxLength={100} name="fullName" defaultValue={name} autoComplete="name" className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
+          <button type="submit" disabled={isProcessing} className="mt-4 h-10 rounded-lg bg-blue-600 px-4 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isProcessing ? "Saving…" : "Update name"}</button>
+        </form>
         <form onSubmit={onUpdateEmail} className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
           <div className="mb-4"><h2 className="text-sm font-semibold">Email address</h2><p className="mt-1 text-xs leading-5 text-slate-500">A confirmation email may be required before your new address becomes active.</p></div>
           <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">Current email<input disabled value={email} className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300" /></label>
