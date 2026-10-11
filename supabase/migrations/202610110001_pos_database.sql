@@ -19,6 +19,15 @@ create table if not exists public.products (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.stock_movements (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid references public.products (id) on delete set null,
+  actor_id uuid references public.profiles (id) on delete set null,
+  quantity integer not null check (quantity > 0),
+  note text,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists public.orders (
   id uuid primary key default gen_random_uuid(),
   employee_id uuid references public.profiles (id) on delete set null,
@@ -164,7 +173,7 @@ begin
     v_subtotal := v_subtotal + v_price * v_item.quantity;
   end loop;
 
-  v_tax := round(v_subtotal * 0.0825, 2);
+  v_tax := round(v_subtotal * 0.12, 2);
   v_total := v_subtotal + v_tax;
   update public.orders
     set subtotal = v_subtotal, tax = v_tax, total = v_total
@@ -177,20 +186,33 @@ $$;
 revoke all on function public.place_order(jsonb) from public, anon;
 grant execute on function public.place_order(jsonb) to authenticated;
 
-create or replace function public.get_admin_dashboard_stats()
+create or replace function public.get_admin_dashboard_stats(p_period text default 'today')
 returns table (
   sales_total numeric,
   orders_today bigint,
   active_products bigint,
-  units_in_stock bigint
+  units_in_stock bigint,
+  active_employees bigint
 )
 language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  v_period_start timestamptz;
 begin
   if not public.is_admin() then
     raise exception 'Admin access is required';
+  end if;
+
+  if p_period = 'today' then
+    v_period_start := date_trunc('day', now() at time zone 'Asia/Manila') at time zone 'Asia/Manila';
+  elsif p_period = '7days' then
+    v_period_start := now() - interval '7 days';
+  elsif p_period = '30days' then
+    v_period_start := now() - interval '30 days';
+  else
+    raise exception 'Unsupported report period';
   end if;
 
   return query
@@ -198,29 +220,72 @@ begin
       coalesce((
         select sum(orders.total)
         from public.orders
-        where orders.created_at >= (date_trunc('day', now() at time zone 'UTC') at time zone 'UTC')
+        where orders.created_at >= v_period_start
       ), 0)::numeric,
       (
         select count(*)
         from public.orders
-        where orders.created_at >= (date_trunc('day', now() at time zone 'UTC') at time zone 'UTC')
+        where orders.created_at >= v_period_start
       ),
       (select count(*) from public.products where products.active = true),
-      coalesce((select sum(products.stock) from public.products where products.active = true), 0)::bigint;
+      coalesce((select sum(products.stock) from public.products where products.active = true), 0)::bigint,
+      (select count(*) from public.profiles where profiles.role = 'employee');
 end;
 $$;
 
-revoke all on function public.get_admin_dashboard_stats() from public, anon;
-grant execute on function public.get_admin_dashboard_stats() to authenticated;
+revoke all on function public.get_admin_dashboard_stats(text) from public, anon;
+grant execute on function public.get_admin_dashboard_stats(text) to authenticated;
+
+create or replace function public.restock_product(
+  p_product_id uuid,
+  p_quantity integer,
+  p_note text default null
+)
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_stock integer;
+begin
+  if not public.is_admin() then
+    raise exception 'Admin access is required';
+  end if;
+  if p_quantity is null or p_quantity < 1 or p_quantity > 1000000 then
+    raise exception 'Restock quantity must be between 1 and 1,000,000';
+  end if;
+  if p_note is not null and length(p_note) > 200 then
+    raise exception 'Restock note must be 200 characters or fewer';
+  end if;
+
+  update public.products
+    set stock = stock + p_quantity, updated_at = now()
+    where id = p_product_id and active = true
+    returning stock into v_stock;
+  if not found then
+    raise exception 'Active product not found';
+  end if;
+
+  insert into public.stock_movements (product_id, actor_id, quantity, note)
+    values (p_product_id, auth.uid(), p_quantity, nullif(btrim(p_note), ''));
+  return v_stock;
+end;
+$$;
+
+revoke all on function public.restock_product(uuid, integer, text) from public, anon;
+grant execute on function public.restock_product(uuid, integer, text) to authenticated;
 
 alter table public.profiles enable row level security;
 alter table public.products enable row level security;
 alter table public.orders enable row level security;
 alter table public.order_items enable row level security;
+alter table public.stock_movements enable row level security;
 
 grant select on public.profiles to authenticated;
 grant select, insert, update, delete on public.products to authenticated;
 grant select on public.orders, public.order_items to authenticated;
+grant select on public.stock_movements to authenticated;
 
 drop policy if exists "Staff can read their own profile and admins can read all" on public.profiles;
 create policy "Staff can read their own profile and admins can read all"
@@ -246,6 +311,11 @@ create policy "Admins can update products"
 drop policy if exists "Admins can delete products" on public.products;
 create policy "Admins can delete products"
   on public.products for delete to authenticated
+  using ((select public.is_admin()));
+
+drop policy if exists "Admins can read stock movements" on public.stock_movements;
+create policy "Admins can read stock movements"
+  on public.stock_movements for select to authenticated
   using ((select public.is_admin()));
 
 drop policy if exists "Staff can read own orders and admins can read all" on public.orders;
@@ -281,5 +351,5 @@ insert into public.products (name, category, price, stock) values
   ('Shampoo Sachet', 'Personal Care', 8.00, 40),
   ('Bath Soap', 'Personal Care', 25.00, 20),
   ('Laundry Detergent Sachet', 'Household', 10.00, 36),
-  ('Fresh Eggs (piece)', 'Rice & Grains', 10.00, 30)
+  ('Fresh Eggs (piece)', 'Eggs & Dairy', 10.00, 30)
 on conflict (name) do nothing;

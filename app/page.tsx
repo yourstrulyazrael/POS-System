@@ -11,13 +11,14 @@ import {
   Clock3,
   Coffee,
   CreditCard,
-  FileUp,
   LayoutDashboard,
+  FileUp,
   LogOut,
   Minus,
   PackagePlus,
   Plus,
   ReceiptText,
+  RefreshCw,
   Search,
   ShieldCheck,
   ShoppingBag,
@@ -25,7 +26,6 @@ import {
   Sparkles,
   Store,
   Trash2,
-  TrendingUp,
   UserRound,
   Users,
   UserPlus,
@@ -35,7 +35,7 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { ThemeSwitcher } from "@/components/theme-switcher";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
 type Role = "employee" | "admin";
@@ -55,12 +55,14 @@ type OrderRow = {
   total: number;
   created_at: string;
   order_items: { quantity: number }[];
+  employee_id?: string | null;
 };
 type Employee = { id: string; email: string; full_name: string; role: "employee" };
-type DashboardStats = { sales_total: number; orders_today: number; active_products: number; units_in_stock: number };
+type DashboardStats = { sales_total: number; orders_today: number; active_products: number; units_in_stock: number; active_employees: number };
+type SalesPeriod = "today" | "7days" | "30days";
 
 const money = (amount: number) =>
-  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(amount);
+  new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(amount);
 
 const categoryColors = ["bg-sky-50", "bg-amber-50", "bg-violet-50", "bg-rose-50"];
 const sariSariCategories = [
@@ -68,6 +70,7 @@ const sariSariCategories = [
   "Canned Goods",
   "Instant Noodles",
   "Snacks",
+  "Eggs & Dairy",
   "Beverages",
   "Coffee & Drinks",
   "Condiments",
@@ -81,6 +84,7 @@ function productAppearance(name: string, category: string, index: number) {
     "Canned Goods": "🥫",
     "Instant Noodles": "🍜",
     Snacks: "🍟",
+    "Eggs & Dairy": "🥚",
     Beverages: "🥤",
     "Coffee & Drinks": "☕",
     Condiments: "🧂",
@@ -108,7 +112,7 @@ function productAppearance(name: string, category: string, index: number) {
   };
 }
 
-async function fetchWorkspaceData(includeAdminStats = false) {
+async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod = "today") {
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
     supabase.from("products").select("id, name, category, price, stock").eq("active", true).order("name").returns<ProductRow[]>(),
@@ -118,7 +122,7 @@ async function fetchWorkspaceData(includeAdminStats = false) {
   if (ordersResult.error) throw new Error(`Unable to load orders: ${ordersResult.error.message}`);
   let stats: DashboardStats | null = null;
   if (includeAdminStats) {
-    const { data, error } = await supabase.rpc("get_admin_dashboard_stats").single();
+    const { data, error } = await supabase.rpc("get_admin_dashboard_stats", { p_period: period }).single();
     if (error) throw new Error(`Unable to load store summary: ${error.message}`);
     if (
       !data ||
@@ -126,7 +130,8 @@ async function fetchWorkspaceData(includeAdminStats = false) {
       !("sales_total" in data) ||
       !("orders_today" in data) ||
       !("active_products" in data) ||
-      !("units_in_stock" in data)
+      !("units_in_stock" in data) ||
+      !("active_employees" in data)
     ) {
       throw new Error("Store summary response was invalid.");
     }
@@ -135,6 +140,7 @@ async function fetchWorkspaceData(includeAdminStats = false) {
       orders_today: Number(data.orders_today),
       active_products: Number(data.active_products),
       units_in_stock: Number(data.units_in_stock),
+      active_employees: Number(data.active_employees),
     };
   }
   return {
@@ -147,7 +153,7 @@ async function fetchWorkspaceData(includeAdminStats = false) {
       id: `#${order.id.slice(0, 8)}`,
       items: order.order_items.reduce((sum, item) => sum + item.quantity, 0),
       total: Number(order.total),
-      time: new Date(order.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }),
+      time: new Date(order.created_at).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
     })),
     stats,
   };
@@ -240,9 +246,14 @@ export default function Home() {
   const [cart, setCart] = useState<Record<string, number>>({});
   const [orders, setOrders] = useState<Order[]>([]);
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
+  const [salesPeriod, setSalesPeriod] = useState<SalesPeriod>("today");
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [readNotifications, setReadNotifications] = useState<string[]>([]);
   const [category, setCategory] = useState("All items");
   const [search, setSearch] = useState("");
-  const [activePage, setActivePage] = useState<"pos" | "inventory" | "orders" | "employees">("pos");
+  const [activePage, setActivePage] = useState<"dashboard" | "pos" | "inventory" | "orders" | "employees">("pos");
   const [showAddProduct, setShowAddProduct] = useState(false);
   const [notice, setNotice] = useState("");
   const [authError, setAuthError] = useState("");
@@ -250,6 +261,7 @@ export default function Home() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [showAddEmployee, setShowAddEmployee] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [restockProduct, setRestockProduct] = useState<Product | null>(null);
 
   const categories = useMemo(
     () => ["All items", ...new Set([...sariSariCategories, ...products.map((product) => product.category)])],
@@ -267,8 +279,25 @@ export default function Home() {
   const cartItems = products.filter((product) => cart[product.id]);
   const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0);
   const subtotal = cartItems.reduce((total, product) => total + product.price * cart[product.id], 0);
-  const tax = Math.round(subtotal * 0.0825 * 100) / 100;
+  const tax = Math.round(subtotal * 0.12 * 100) / 100;
   const total = Math.round((subtotal + tax) * 100) / 100;
+  const notifications = [
+    ...products
+      .filter((product) => product.stock <= 5)
+      .map((product) => ({
+        id: `low-stock-${product.id}`,
+        title: "Low stock",
+        message: `${product.name} has ${product.stock} left.`,
+        page: "inventory" as const,
+      })),
+    ...orders.slice(0, 5).map((order) => ({
+      id: `order-${order.id}`,
+      title: "Recent sale",
+      message: `${order.id} · ${money(order.total)}`,
+      page: "orders" as const,
+    })),
+  ];
+  const unreadNotificationCount = notifications.filter((item) => !readNotifications.includes(item.id)).length;
 
   useEffect(() => {
     let cancelled = false;
@@ -294,6 +323,8 @@ export default function Home() {
         setProducts(workspace.products);
         setOrders(workspace.orders);
         setDashboardStats(workspace.stats);
+        setLastRefreshedAt(new Date());
+        if (profile.role === "admin") setActivePage("dashboard");
         setSignedIn(true);
       } catch (error) {
         if (!cancelled) setAuthError(error instanceof Error ? error.message : "Unable to restore your session.");
@@ -305,12 +336,33 @@ export default function Home() {
     return () => { cancelled = true; };
   }, []);
 
-  async function refreshWorkspace() {
-    const workspace = await fetchWorkspaceData(role === "admin");
+  const refreshWorkspace = useCallback(async (period = salesPeriod) => {
+    const workspace = await fetchWorkspaceData(role === "admin", period);
     setProducts(workspace.products);
     setOrders(workspace.orders);
     setDashboardStats(workspace.stats);
-  }
+    setLastRefreshedAt(new Date());
+  }, [role, salesPeriod]);
+
+  const refreshDashboard = useCallback(async (period = salesPeriod, quiet = false) => {
+    setIsRefreshing(true);
+    try {
+      await refreshWorkspace(period);
+      setSalesPeriod(period);
+    } catch (error) {
+      setNotice(`${quiet ? "Automatic refresh failed" : "Unable to refresh the dashboard"}: ${error instanceof Error ? error.message : "Unknown error"}`);
+    } finally {
+      setIsRefreshing(false);
+    }
+  }, [refreshWorkspace, salesPeriod]);
+
+  useEffect(() => {
+    if (!signedIn || role !== "admin") return;
+    const timer = window.setInterval(() => {
+      void refreshDashboard(salesPeriod, true);
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [refreshDashboard, role, salesPeriod, signedIn]);
 
   async function addToCart(product: Product) {
     if (product.stock < (cart[product.id] ?? 0) + 1) {
@@ -386,11 +438,13 @@ export default function Home() {
         await supabase.auth.signOut();
         throw new Error(`This account is ${profile.role}. Select the ${profile.role} workspace to continue.`);
       }
-      const workspace = await fetchWorkspaceData(profile.role === "admin");
+      const workspace = await fetchWorkspaceData(profile.role === "admin", salesPeriod);
       setEmployeeName(profile.full_name || authData.user.email || "Team member");
       setProducts(workspace.products);
       setOrders(workspace.orders);
       setDashboardStats(workspace.stats);
+      setLastRefreshedAt(new Date());
+      setActivePage(profile.role === "admin" ? "dashboard" : "pos");
       setSignedIn(true);
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : "Unable to sign in.");
@@ -407,7 +461,7 @@ export default function Home() {
     const stock = Number(formData.get("stock"));
     const selectedCategory = String(formData.get("category") ?? sariSariCategories[0]);
     if (!name || !Number.isFinite(price) || price <= 0 || !Number.isInteger(stock) || stock < 0) {
-      setNotice("Enter a product name, a price above $0, and a valid stock quantity.");
+      setNotice("Enter a product name, a price above ₱0, and a valid stock quantity.");
       return;
     }
     try {
@@ -439,8 +493,48 @@ export default function Home() {
         return next;
       });
       setNotice(`${product.name} removed from inventory.`);
+      try {
+        await refreshWorkspace();
+      } catch (error) {
+        setNotice(`${product.name} was removed, but dashboard data could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Unable to remove product.");
+    }
+  }
+
+  async function restock(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!restockProduct) return;
+    const formData = new FormData(event.currentTarget);
+    const quantity = Number(formData.get("quantity"));
+    const note = String(formData.get("note") ?? "").trim();
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1_000_000) {
+      setNotice("Enter a restock quantity between 1 and 1,000,000.");
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.rpc("restock_product", {
+        p_product_id: restockProduct.id,
+        p_quantity: quantity,
+        p_note: note || null,
+      });
+      if (error) throw error;
+      const productName = restockProduct.name;
+      setRestockProduct(null);
+      setNotice(`${productName} restocked by ${quantity} unit${quantity === 1 ? "" : "s"}.`);
+      setReadNotifications((current) => current.filter((id) => id !== `low-stock-${restockProduct.id}`));
+      try {
+        await refreshWorkspace();
+      } catch (error) {
+        setNotice(`${productName} was restocked, but dashboard data could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Unable to update product stock.");
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -653,7 +747,8 @@ export default function Home() {
           <div className="mt-10">
             <p className="mb-3 px-3 text-[10px] font-bold tracking-[0.16em] text-slate-400">WORKSPACE</p>
             <nav className="space-y-1">
-              <SidebarLink icon={LayoutDashboard} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
+              {isAdmin && <SidebarLink icon={LayoutDashboard} label="Dashboard" active={currentView === "dashboard"} onClick={() => setActivePage("dashboard")} />}
+              <SidebarLink icon={ShoppingCart} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
               {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
               {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
               <SidebarLink icon={ClipboardList} label="Orders" active={currentView === "orders"} onClick={() => setActivePage("orders")} />
@@ -680,11 +775,21 @@ export default function Home() {
             <div className="flex items-center gap-2 sm:gap-4">
               <div className="hidden items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600 sm:flex">
                 <Clock3 size={14} className="text-slate-400" />
-                {new Date().toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })}
+                {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
               </div>
-              <button type="button" aria-label="Notifications" className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50">
-                <Bell size={19} /><span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-blue-500 ring-2 ring-white" />
-              </button>
+              <div className="relative">
+                <button type="button" aria-label="Notifications" aria-expanded={showNotifications} onClick={() => setShowNotifications((current) => !current)} className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800">
+                  <Bell size={19} />
+                  {unreadNotificationCount > 0 && <span className="absolute -right-0.5 -top-0.5 grid min-h-4 min-w-4 place-items-center rounded-full bg-red-500 px-1 text-[9px] font-bold text-white ring-2 ring-white dark:ring-slate-900">{unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}</span>}
+                </button>
+                {showNotifications && <div className="absolute right-0 top-12 z-50 w-[min(340px,calc(100vw-32px))] overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
+                  <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3 dark:border-slate-700"><div><p className="text-sm font-semibold">Notifications</p><p className="text-[11px] text-slate-400">{unreadNotificationCount} unread</p></div><button type="button" onClick={() => setReadNotifications(notifications.map((item) => item.id))} className="text-[11px] font-semibold text-blue-600 hover:text-blue-700">Mark all read</button></div>
+                  {notifications.length > 0 ? <div className="max-h-80 overflow-y-auto">{notifications.map((item) => {
+                    const unread = !readNotifications.includes(item.id);
+                    return <button type="button" key={item.id} onClick={() => { setReadNotifications((current) => current.includes(item.id) ? current : [...current, item.id]); setActivePage(item.page); setShowNotifications(false); }} className={`flex w-full items-start gap-3 border-b border-slate-50 px-4 py-3 text-left last:border-0 hover:bg-slate-50 dark:border-slate-800 dark:hover:bg-slate-800 ${unread ? "bg-blue-50/60 dark:bg-blue-950/20" : ""}`}><span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${unread ? "bg-blue-600" : "bg-slate-200"}`} /><span><span className="block text-xs font-semibold">{item.title}</span><span className="mt-1 block text-[11px] leading-4 text-slate-500">{item.message}</span></span></button>;
+                  })}</div> : <div className="px-4 py-8 text-center text-xs text-slate-400"><Bell size={20} className="mx-auto mb-2 opacity-50" />You’re all caught up.</div>}
+                </div>}
+              </div>
               <ThemeSwitcher />
               <div className="h-8 w-px bg-slate-100" />
               <div className="flex items-center gap-2.5">
@@ -699,7 +804,8 @@ export default function Home() {
           </header>
 
           <nav aria-label="Workspace navigation" className="flex gap-1 overflow-x-auto border-b border-slate-100 bg-white px-4 py-2 dark:border-slate-800 dark:bg-slate-900 lg:hidden">
-            <SidebarLink icon={LayoutDashboard} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
+            {isAdmin && <SidebarLink icon={LayoutDashboard} label="Dashboard" active={currentView === "dashboard"} onClick={() => setActivePage("dashboard")} />}
+            <SidebarLink icon={ShoppingCart} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
             {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
             {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
             <SidebarLink icon={ClipboardList} label="Orders" active={currentView === "orders"} onClick={() => setActivePage("orders")} />
@@ -713,7 +819,20 @@ export default function Home() {
               </div>
             )}
 
-            {currentView === "employees" && isAdmin ? (
+            {currentView === "dashboard" && isAdmin && dashboardStats ? (
+              <AdminOverview
+                stats={dashboardStats}
+                products={products}
+                orders={orders}
+                period={salesPeriod}
+                lastRefreshedAt={lastRefreshedAt}
+                isRefreshing={isRefreshing}
+                onPeriodChange={(period) => void refreshDashboard(period)}
+                onRefresh={() => void refreshDashboard()}
+                onViewInventory={() => setActivePage("inventory")}
+                onViewOrders={() => setActivePage("orders")}
+              />
+            ) : currentView === "employees" && isAdmin ? (
               <EmployeeView
                 employees={employees}
                 onAdd={() => setShowAddEmployee(true)}
@@ -726,13 +845,13 @@ export default function Home() {
                 onRemove={removeProduct}
                 onImport={importProducts}
                 isImporting={isImporting}
+                onRestock={setRestockProduct}
               />
             ) : currentView === "orders" ? (
               <OrdersView orders={orders} />
             ) : (
               <div className="grid items-start gap-6 2xl:grid-cols-[minmax(0,1fr)_350px]">
                 <section className="min-w-0">
-                  {isAdmin && dashboardStats && <AdminOverview stats={dashboardStats} />}
                   <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
                     <div>
                       <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">New sale</span></div>
@@ -807,9 +926,9 @@ export default function Home() {
               <button type="button" aria-label="Close dialog" onClick={() => setShowAddProduct(false)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
             </div>
             <form onSubmit={addProduct} className="space-y-4">
-              <label className="block text-sm font-medium text-slate-700">Product name<input required name="name" placeholder="e.g. Caramel latte" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <label className="block text-sm font-medium text-slate-700">Product name<input required name="name" placeholder="e.g. Sardines (155 g)" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <div className="grid grid-cols-2 gap-3">
-                <label className="block text-sm font-medium text-slate-700">Price ($)<input required name="price" type="number" min="0.01" step="0.01" placeholder="4.50" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+                <label className="block text-sm font-medium text-slate-700">Price (₱)<input required name="price" type="number" min="0.01" step="0.01" placeholder="25.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
                 <label className="block text-sm font-medium text-slate-700">Stock<input required name="stock" type="number" min="0" step="1" placeholder="12" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               </div>
               <label className="block text-sm font-medium text-slate-700">Category<select name="category" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50">{categories.filter((item) => item !== "All items").map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
@@ -827,6 +946,18 @@ export default function Home() {
               <label className="block text-sm font-medium text-slate-700">Work email<input required type="email" name="email" autoComplete="email" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Temporary password<input required minLength={8} type="password" name="password" autoComplete="new-password" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /><span className="mt-1 block text-xs font-normal text-slate-400">At least 8 characters. Share it securely with the employee.</span></label>
               <div className="flex gap-3 pt-2"><button type="button" onClick={() => setShowAddEmployee(false)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button disabled={isLoading} type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Creating…" : "Create account"}</button></div>
+            </form>
+          </div>
+        </div>
+      )}
+      {restockProduct && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) setRestockProduct(null); }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="restock-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
+            <div className="mb-5 flex items-start justify-between"><div><p className="text-xs font-semibold text-blue-600">STOCK ADJUSTMENT</p><h2 id="restock-title" className="mt-1 text-xl font-semibold">Restock product</h2><p className="mt-1 text-sm text-slate-500">{restockProduct.name} · currently {restockProduct.stock} in stock</p></div><button type="button" aria-label="Close dialog" onClick={() => setRestockProduct(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button></div>
+            <form onSubmit={restock} className="space-y-4">
+              <label className="block text-sm font-medium text-slate-700">Units received<input required autoFocus name="quantity" type="number" min="1" max="1000000" step="1" placeholder="e.g. 24" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <label className="block text-sm font-medium text-slate-700">Note <span className="font-normal text-slate-400">(optional)</span><input maxLength={200} name="note" placeholder="Supplier delivery, invoice number…" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <div className="flex gap-3 pt-2"><button type="button" onClick={() => setRestockProduct(null)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button disabled={isLoading} type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Updating…" : "Add to stock"}</button></div>
             </form>
           </div>
         </div>
@@ -856,20 +987,69 @@ function SidebarLink({ icon: Icon, label, active, onClick }: { icon: LucideIcon;
   );
 }
 
-function AdminOverview({ stats }: { stats: DashboardStats }) {
+function AdminOverview({
+  stats,
+  products,
+  orders,
+  period,
+  lastRefreshedAt,
+  isRefreshing,
+  onPeriodChange,
+  onRefresh,
+  onViewInventory,
+  onViewOrders,
+}: {
+  stats: DashboardStats;
+  products: Product[];
+  orders: Order[];
+  period: SalesPeriod;
+  lastRefreshedAt: Date | null;
+  isRefreshing: boolean;
+  onPeriodChange: (period: SalesPeriod) => void;
+  onRefresh: () => void;
+  onViewInventory: () => void;
+  onViewOrders: () => void;
+}) {
+  const lowStockProducts = products.filter((product) => product.stock <= 5);
   const cards: { label: string; value: string; detail: string; icon: LucideIcon; color: string }[] = [
-    { label: "Today’s sales", value: money(stats.sales_total), detail: "Recorded today (UTC)", icon: CircleDollarSign, color: "bg-blue-50 text-blue-600" },
-    { label: "Orders today", value: String(stats.orders_today), detail: "Completed orders", icon: ReceiptText, color: "bg-violet-50 text-violet-600" },
-    { label: "Items in stock", value: String(stats.units_in_stock), detail: `${stats.active_products} active products`, icon: Boxes, color: "bg-emerald-50 text-emerald-600" },
+    { label: "Sales", value: money(stats.sales_total), detail: periodLabel(period), icon: CircleDollarSign, color: "bg-blue-50 text-blue-600" },
+    { label: "Orders", value: String(stats.orders_today), detail: period === "today" ? "Today · Asia/Manila" : periodLabel(period), icon: ReceiptText, color: "bg-violet-50 text-violet-600" },
+    { label: "Inventory", value: String(stats.units_in_stock), detail: `${stats.active_products} active products`, icon: Boxes, color: "bg-emerald-50 text-emerald-600" },
+    { label: "Employees", value: String(stats.active_employees), detail: "Active staff accounts", icon: Users, color: "bg-amber-50 text-amber-600" },
   ];
   return (
-    <section className="mb-7">
-      <div className="mb-4 flex items-end justify-between"><div><p className="mb-1 text-xs font-medium text-slate-400">LIVE STORE PERFORMANCE</p><h2 className="text-lg font-semibold">Your store at a glance</h2></div><span className="flex items-center gap-1 text-xs font-semibold text-blue-600"><TrendingUp size={14} /> Live data</span></div>
-      <div className="grid gap-3 sm:grid-cols-3">
+    <section>
+      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Dashboard</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Store dashboard</h1><p className="mt-1 text-sm text-slate-500">Live sales, team, and inventory performance.</p></div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select aria-label="Sales report period" value={period} onChange={(event) => onPeriodChange(event.target.value as SalesPeriod)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold outline-none focus:border-blue-400">
+            <option value="today">Today</option><option value="7days">Last 7 days</option><option value="30days">Last 30 days</option>
+          </select>
+          <button type="button" onClick={onRefresh} disabled={isRefreshing} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-60"><RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} /> Refresh</button>
+        </div>
+      </div>
+      <div className="mb-4 flex items-center justify-between text-[11px] text-slate-400"><span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />Auto-refresh every 30 seconds</span><span>Last updated: {lastRefreshedAt ? lastRefreshedAt.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", second: "2-digit", timeZone: "Asia/Manila" }) : "—"}</span></div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {cards.map(({ label, value, detail, icon: Icon, color }) => <div key={label} className="rounded-2xl border border-slate-100 bg-white p-4"><div className="flex items-center justify-between"><span className="text-xs font-medium text-slate-500">{label}</span><span className={`grid h-8 w-8 place-items-center rounded-lg ${color}`}><Icon size={16} /></span></div><p className="mt-3 text-2xl font-semibold tracking-tight">{value}</p><p className="mt-1 text-[10px] text-slate-400">{detail}</p></div>)}
+      </div>
+      <div className="mt-6 grid gap-4 xl:grid-cols-2">
+        <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
+          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Low stock</h2><p className="mt-1 text-xs text-slate-400">Products with 5 or fewer units</p></div><button type="button" onClick={onViewInventory} className="text-xs font-semibold text-blue-600 hover:text-blue-700">Manage inventory <ArrowRight size={13} className="ml-1 inline" /></button></div>
+          {lowStockProducts.length ? <div className="divide-y divide-slate-100">{lowStockProducts.slice(0, 5).map((product) => <div key={product.id} className="flex items-center justify-between gap-3 px-5 py-3"><div className="flex min-w-0 items-center gap-3"><span className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg text-lg ${product.color}`}>{product.emoji}</span><div className="min-w-0"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{product.category}</p></div></div><span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-semibold text-amber-700">{product.stock} left</span></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No products need restocking.</div>}
+        </div>
+        <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
+          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Recent sales</h2><p className="mt-1 text-xs text-slate-400">Latest completed transactions</p></div><button type="button" onClick={onViewOrders} className="text-xs font-semibold text-blue-600 hover:text-blue-700">All orders <ArrowRight size={13} className="ml-1 inline" /></button></div>
+          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time}</p></div><p className="text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
+        </div>
       </div>
     </section>
   );
+}
+
+function periodLabel(period: SalesPeriod) {
+  if (period === "7days") return "Last 7 days";
+  if (period === "30days") return "Last 30 days";
+  return "Today · Asia/Manila";
 }
 
 function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, onCheckout, onClear, isProcessing }: {
@@ -899,7 +1079,7 @@ function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, o
         </li>)}</ul> : <div className="flex min-h-[180px] flex-col items-center justify-center text-center"><div className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-500"><ShoppingCart size={20} /></div><p className="mt-3 text-xs font-semibold text-slate-700">Your order is empty</p><p className="mt-1 text-[11px] text-slate-400">Add a product to get started.</p></div>}
       </div>
       <div className="border-t border-slate-100 px-5 py-4">
-        <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(subtotal)}</span></div><div className="flex justify-between text-slate-500"><span>Tax <span className="text-slate-400">(8.25%)</span></span><span className="font-medium text-slate-700">{money(tax)}</span></div><div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
+        <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(subtotal)}</span></div><div className="flex justify-between text-slate-500"><span>VAT <span className="text-slate-400">(12%)</span></span><span className="font-medium text-slate-700">{money(tax)}</span></div><div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
         <button type="button" disabled={!count || isProcessing} onClick={onCheckout} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : `Charge ${money(total)}`}</button>
         <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-slate-400"><WalletCards size={13} /> Secure, fast checkout</p>
       </div>
@@ -907,12 +1087,13 @@ function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, o
   );
 }
 
-function InventoryView({ products, onAdd, onRemove, onImport, isImporting }: {
+function InventoryView({ products, onAdd, onRemove, onImport, isImporting, onRestock }: {
   products: Product[];
   onAdd: () => void;
   onRemove: (product: Product) => void;
   onImport: (file: File) => void;
   isImporting: boolean;
+  onRestock: (product: Product) => void;
 }) {
   const lowStock = products.filter((product) => product.stock < 10).length;
   return (
@@ -932,7 +1113,7 @@ function InventoryView({ products, onAdd, onRemove, onImport, isImporting }: {
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Action</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><span className={`grid h-9 w-9 place-items-center rounded-lg text-lg ${product.color}`}>{product.emoji}</span><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><span className={`grid h-9 w-9 place-items-center rounded-lg text-lg ${product.color}`}>{product.emoji}</span><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
       </div>
     </section>
   );

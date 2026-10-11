@@ -102,7 +102,7 @@ If you wish to just develop locally and not deploy to Vercel, [follow the steps 
 
 This POS uses the Supabase project configured in `.env.local`.
 
-1. Apply [`supabase/migrations/202610110001_pos_database.sql`](./supabase/migrations/202610110001_pos_database.sql) to your Supabase project using the Supabase SQL editor. It creates the staff profiles, products, orders and order items tables, role-based row-level security, atomic checkout, and starter products.
+1. Apply all SQL migrations in `supabase/migrations` to your Supabase project, in filename order, using the Supabase SQL editor or Supabase CLI. They create the POS schema, role-based row-level security, atomic checkout, sari-sari starter products, audited stock adjustments, and live admin reporting.
 2. Disable public email sign-ups in Supabase Auth settings so employees can only be created by admins.
 3. Add these server-only values to `.env.local`. Get the service-role key from your Supabase project's API settings. Generate `POS_SETUP_SECRET` as a random secret of at least 32 characters. Never expose or commit either value.
 
@@ -116,7 +116,7 @@ This POS uses the Supabase project configured in `.env.local`.
 
 Product imports accept CSV headers `name,category,price,stock` or a JSON array of objects with those fields. A matching product name updates the existing catalog record.
 
-For databases that already applied the original POS migration, also apply [`supabase/migrations/202610110002_sari_sari_catalog.sql`](./supabase/migrations/202610110002_sari_sari_catalog.sql) to replace the original café demo products with sari-sari store stock. It deactivates only the original demo items and keeps their order history intact.
+For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports.
 
 Dark mode is available from the theme control and remembers the selected theme.
 

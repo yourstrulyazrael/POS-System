@@ -29,5 +29,5 @@ insert into public.products (name, category, price, stock) values
   ('Shampoo Sachet', 'Personal Care', 8.00, 40),
   ('Bath Soap', 'Personal Care', 25.00, 20),
   ('Laundry Detergent Sachet', 'Household', 10.00, 36),
-  ('Fresh Eggs (piece)', 'Rice & Grains', 10.00, 30)
+  ('Fresh Eggs (piece)', 'Eggs & Dairy', 10.00, 30)
 on conflict (name) do nothing;
