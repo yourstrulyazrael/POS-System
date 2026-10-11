@@ -116,9 +116,11 @@ This POS uses the Supabase project configured in `.env.local`.
 
 Product imports accept CSV headers `name,category,price,stock` or a JSON array of objects with those fields. Add the optional `image_icon` field to select a preset icon (`auto`, `rice`, `canned`, `noodles`, `snacks`, `eggs`, `drink`, `coffee`, `condiments`, `personal-care`, `household`, `bread`, `candy`, `frozen`, or `medicine`). A matching product name updates the existing catalog record.
 
-When adding an item in the admin inventory, product artwork can be auto-detected from its name/category, selected from the preset icon grid, or uploaded as a JPEG, PNG, or WebP image (up to 5 MB). Custom images are stored in the `product-images` Supabase Storage bucket.
+When adding or editing an item in the admin inventory, product artwork can be auto-detected from its name/category, selected from the preset icon grid, or uploaded as a JPEG, PNG, or WebP image (up to 5 MB). Custom images are stored in the `product-images` Supabase Storage bucket.
 
-For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports; the product images migration enables preset icons and admin-only image uploads.
+Checkout supports Cash and GCash. For GCash, staff must verify the transfer in the store's GCash account and enter the last four digits of its reference number. The POS stores those digits for transaction records; it does not process or automatically verify GCash transfers.
+
+For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports; the product images migration enables preset icons and admin-only image uploads; and the payment migration stores the payment method and GCash reference digits with each order.
 
 Dark mode is available from the theme control and remembers the selected theme.
 

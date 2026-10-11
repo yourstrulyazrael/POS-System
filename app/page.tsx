@@ -11,6 +11,8 @@ import {
   Clock3,
   Coffee,
   CreditCard,
+  Banknote,
+  CircleHelp,
   LayoutDashboard,
   FileUp,
   LogOut,
@@ -51,13 +53,15 @@ type Product = {
   emoji: string;
   color: string;
 };
-type Order = { id: string; items: number; total: number; time: string };
+type Order = { id: string; items: number; total: number; time: string; paymentMethod: "cash" | "gcash"; gcashReferenceLast4: string | null };
 type ProductRow = { id: string; name: string; category: string; price: number; stock: number; image_icon: string | null; image_url: string | null };
 type OrderRow = {
   id: string;
   total: number;
   created_at: string;
   order_items: { quantity: number }[];
+  payment_method: "cash" | "gcash";
+  gcash_reference_last4: string | null;
   employee_id?: string | null;
 };
 type Employee = { id: string; email: string; full_name: string; role: "employee" };
@@ -139,7 +143,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
     supabase.from("products").select("id, name, category, price, stock, image_icon, image_url").eq("active", true).order("name").returns<ProductRow[]>(),
-    supabase.from("orders").select("id, total, created_at, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
+    supabase.from("orders").select("id, total, created_at, payment_method, gcash_reference_last4, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
   if (ordersResult.error) throw new Error(`Unable to load orders: ${ordersResult.error.message}`);
@@ -179,6 +183,8 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       items: order.order_items.reduce((sum, item) => sum + item.quantity, 0),
       total: Number(order.total),
       time: new Date(order.created_at).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
+      paymentMethod: order.payment_method,
+      gcashReferenceLast4: order.gcash_reference_last4,
     })),
     stats,
   };
@@ -284,6 +290,11 @@ export default function Home() {
   const [showAddProduct, setShowAddProduct] = useState(false);
   const [selectedProductIcon, setSelectedProductIcon] = useState("auto");
   const [selectedProductImage, setSelectedProductImage] = useState<File | null>(null);
+  const [editingProductImage, setEditingProductImage] = useState<Product | null>(null);
+  const [removeExistingProductImage, setRemoveExistingProductImage] = useState(false);
+  const [showHelpCenter, setShowHelpCenter] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<"cash" | "gcash">("cash");
+  const [gcashReferenceLast4, setGcashReferenceLast4] = useState("");
   const [notice, setNotice] = useState("");
   const [authError, setAuthError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -421,11 +432,17 @@ export default function Home() {
 
   async function checkout() {
     if (!itemCount) return;
+    if (paymentMethod === "gcash" && !/^\d{4}$/.test(gcashReferenceLast4)) {
+      setNotice("Enter the last 4 digits of the GCash reference number.");
+      return;
+    }
     setIsLoading(true);
     try {
       const supabase = createClient();
       const { data, error } = await supabase.rpc("place_order", {
         p_items: cartItems.map((product) => ({ product_id: product.id, quantity: cart[product.id] })),
+        p_payment_method: paymentMethod,
+        p_gcash_reference_last4: paymentMethod === "gcash" ? gcashReferenceLast4 : null,
       }).single();
       if (error) throw error;
       if (!data || typeof data !== "object" || !("order_id" in data) || typeof data.order_id !== "string") {
@@ -433,6 +450,7 @@ export default function Home() {
       }
       const newOrderId = data.order_id.slice(0, 8);
       setCart({});
+      setGcashReferenceLast4("");
       setNotice(`Order #${newOrderId} placed successfully.`);
       try {
         await refreshWorkspace();
@@ -570,6 +588,78 @@ export default function Home() {
       }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Unable to remove product.");
+    }
+  }
+
+  async function saveProductImage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingProductImage) return;
+    if (selectedProductImage && (
+      !["image/jpeg", "image/png", "image/webp"].includes(selectedProductImage.type) ||
+      selectedProductImage.size > 5 * 1024 * 1024
+    )) {
+      setNotice("Choose a JPEG, PNG, or WebP image that is no larger than 5 MB.");
+      return;
+    }
+    let uploadedPath: string | null = null;
+    let imageSaved = false;
+    setIsLoading(true);
+    try {
+      const supabase = createClient();
+      let imageUrl = removeExistingProductImage ? null : editingProductImage.imageUrl;
+      if (selectedProductImage) {
+        const extensionByType: Record<string, string> = {
+          "image/jpeg": "jpg",
+          "image/png": "png",
+          "image/webp": "webp",
+        };
+        uploadedPath = `${crypto.randomUUID()}.${extensionByType[selectedProductImage.type]}`;
+        const { error: uploadError } = await supabase.storage
+          .from("product-images")
+          .upload(uploadedPath, selectedProductImage, {
+            contentType: selectedProductImage.type,
+            cacheControl: "3600",
+            upsert: false,
+          });
+        if (uploadError) throw new Error(`Unable to upload product image: ${uploadError.message}`);
+        imageUrl = supabase.storage.from("product-images").getPublicUrl(uploadedPath).data.publicUrl;
+      }
+      const { error } = await supabase.from("products").update({
+        image_icon: selectedProductIcon,
+        image_url: imageUrl,
+      }).eq("id", editingProductImage.id);
+      if (error) throw error;
+      imageSaved = true;
+      const previousImageUrl = editingProductImage.imageUrl;
+      setEditingProductImage(null);
+      setSelectedProductImage(null);
+      setSelectedProductIcon("auto");
+      setRemoveExistingProductImage(false);
+      setNotice(`${editingProductImage.name} image updated.`);
+      if (previousImageUrl && (removeExistingProductImage || uploadedPath)) {
+        const imagePathMarker = "/storage/v1/object/public/product-images/";
+        const oldPath = previousImageUrl.split(imagePathMarker)[1]?.split(/[?#]/)[0];
+        if (oldPath && /^[0-9a-f-]{36}\.(jpg|png|webp)$/i.test(oldPath)) {
+          const { error: cleanupError } = await supabase.storage.from("product-images").remove([oldPath]);
+          if (cleanupError) setNotice(`${editingProductImage.name} was updated, but its previous image could not be removed: ${cleanupError.message}`);
+        } else {
+          setNotice(`${editingProductImage.name} was updated, but its previous image is not in the managed image bucket and was not removed.`);
+        }
+      }
+      try {
+        await refreshWorkspace();
+      } catch (error) {
+        setNotice(`${editingProductImage.name} was updated, but the catalog could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
+    } catch (error) {
+      if (uploadedPath && !imageSaved) {
+        const supabase = createClient();
+        const { error: cleanupError } = await supabase.storage.from("product-images").remove([uploadedPath]);
+        if (cleanupError) console.error("Unable to remove an unused product image:", cleanupError.message);
+      }
+      setNotice(error instanceof Error ? error.message : "Unable to update product image.");
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -828,7 +918,7 @@ export default function Home() {
             <div className="mb-3 grid h-9 w-9 place-items-center rounded-xl bg-white text-blue-600 shadow-sm"><CircleHelpIcon /></div>
             <p className="text-sm font-semibold">Need a hand?</p>
             <p className="mt-1 text-xs leading-5 text-slate-500">Your store team is here to help you out.</p>
-            <button type="button" className="mt-3 text-xs font-semibold text-blue-700">Visit help center <ArrowRight size={12} className="ml-1 inline" /></button>
+            <button type="button" onClick={() => setShowHelpCenter(true)} className="mt-3 text-xs font-semibold text-blue-700">Visit help center <ArrowRight size={12} className="ml-1 inline" /></button>
           </div>
           <button type="button" onClick={() => void signOut()} className="mt-5 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800">
             <LogOut size={17} /> Sign out
@@ -843,6 +933,7 @@ export default function Home() {
               <p className="mt-0.5 text-xs text-slate-400">Here’s what’s happening in your store today.</p>
             </div>
             <div className="flex items-center gap-2 sm:gap-4">
+              <button type="button" aria-label="Open help center" onClick={() => setShowHelpCenter(true)} className="grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={19} /></button>
               <div className="hidden items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600 sm:flex">
                 <Clock3 size={14} className="text-slate-400" />
                 {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
@@ -888,6 +979,36 @@ export default function Home() {
                 <button type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={16} /></button>
               </div>
             )}
+            {editingProductImage && (
+              <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); } }}>
+                <div role="dialog" aria-modal="true" aria-labelledby="edit-product-image-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
+                  <div className="mb-5 flex items-start justify-between">
+                    <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="edit-product-image-title" className="mt-1 text-xl font-semibold">Update product image</h2><p className="mt-1 text-sm text-slate-500">{editingProductImage.name}</p></div>
+                    <button type="button" aria-label="Close dialog" disabled={isLoading} onClick={() => { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
+                  </div>
+                  <form onSubmit={saveProductImage} className="space-y-5">
+                    <ProductImagePicker
+                      selectedIcon={selectedProductIcon}
+                      selectedImage={selectedProductImage}
+                      existingImageUrl={editingProductImage.imageUrl}
+                      existingImageRemoved={removeExistingProductImage}
+                      onRemoveExisting={() => setRemoveExistingProductImage(true)}
+                      onIconChange={(icon) => { setSelectedProductIcon(icon); setRemoveExistingProductImage(true); }}
+                      onImageChange={setSelectedProductImage}
+                    />
+                    <div className="flex gap-3">
+                      <button type="button" disabled={isLoading} onClick={() => { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button>
+                      <button type="submit" disabled={isLoading} className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : "Save image"}</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+            {showHelpCenter && <HelpCenterDialog
+              onClose={() => setShowHelpCenter(false)}
+              showInventory={isAdmin}
+              onNavigate={(page) => { setShowHelpCenter(false); setActivePage(page); }}
+            />}
 
             {currentView === "dashboard" && isAdmin && dashboardStats ? (
               <AdminOverview
@@ -912,6 +1033,12 @@ export default function Home() {
               <InventoryView
                 products={products}
                 onAdd={() => { setSelectedProductIcon("auto"); setSelectedProductImage(null); setShowAddProduct(true); }}
+                onEditImage={(product) => {
+                  setSelectedProductIcon(product.imageIcon);
+                  setSelectedProductImage(null);
+                  setRemoveExistingProductImage(false);
+                  setEditingProductImage(product);
+                }}
                 onRemove={removeProduct}
                 onImport={importProducts}
                 isImporting={isImporting}
@@ -978,6 +1105,10 @@ export default function Home() {
                   total={total}
                   onChange={changeQuantity}
                   onCheckout={checkout}
+                  paymentMethod={paymentMethod}
+                  onPaymentMethodChange={(method) => { setPaymentMethod(method); setGcashReferenceLast4(""); }}
+                  gcashReferenceLast4={gcashReferenceLast4}
+                  onGcashReferenceChange={setGcashReferenceLast4}
                   isProcessing={isLoading}
                   onClear={() => setCart({})}
                 />
@@ -1052,7 +1183,7 @@ function Brand({ light = false, compact = false }: { light?: boolean; compact?: 
 }
 
 function CircleHelpIcon() {
-  return <ShoppingBag size={17} />;
+  return <CircleHelp size={17} />;
 }
 
 function SidebarLink({ icon: Icon, label, active, onClick }: { icon: LucideIcon; label: string; active: boolean; onClick: () => void }) {
@@ -1128,6 +1259,46 @@ function periodLabel(period: SalesPeriod) {
   return "Today · Asia/Manila";
 }
 
+function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
+  onClose: () => void;
+  onNavigate: (page: "pos" | "inventory" | "orders") => void;
+  showInventory: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="help-center-title" className="max-h-[85vh] w-full max-w-xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
+        <div className="mb-5 flex items-start justify-between">
+          <div className="flex items-start gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><CircleHelp size={20} /></div><div><p className="text-xs font-semibold text-blue-600">CLOVER &amp; CO. SUPPORT</p><h2 id="help-center-title" className="mt-1 text-xl font-semibold">Help center</h2><p className="mt-1 text-sm text-slate-500">Quick answers for everyday store tasks.</p></div></div>
+          <button type="button" aria-label="Close help center" onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
+        </div>
+        <div className="divide-y divide-slate-100 rounded-xl border border-slate-100 px-4">
+          <details className="py-3" open>
+            <summary className="cursor-pointer text-sm font-semibold">How do I complete a sale?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Open Point of sale, add products to the cart, choose Cash or GCash, and confirm the checkout. Stock is deducted when the order is recorded.</p>
+          </details>
+          <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">How do I record a GCash payment?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">First verify the payment in your store&apos;s GCash account. Select GCash in the cart and enter the final 4 digits of the transaction reference before recording the sale. The POS records the reference digits; it does not verify or process the transfer itself.</p>
+          </details>
+          <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">How do I add stock or update product photos?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Admins can open Inventory to restock an item or use its Image action to upload or change its custom photo. New products can also be given a custom image when added.</p>
+          </details>
+          <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">Where can I find completed sales?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Open Orders to review recent transactions, totals, payment methods, and any recorded GCash reference digits.</p>
+          </details>
+        </div>
+        <div className="mt-5 flex flex-wrap gap-2">
+          <button type="button" onClick={() => onNavigate("pos")} className="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"><ShoppingCart size={14} /> Open point of sale</button>
+          {showInventory && <button type="button" onClick={() => onNavigate("inventory")} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50"><Boxes size={14} /> Open inventory</button>}
+          <button type="button" onClick={() => onNavigate("orders")} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50"><ReceiptText size={14} /> View orders</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function ProductArtwork({ product, className = "" }: { product: Product; className?: string }) {
   return (
     <div className={`relative grid shrink-0 place-items-center overflow-hidden ${product.color} ${className}`}>
@@ -1150,11 +1321,17 @@ function ProductArtwork({ product, className = "" }: { product: Product; classNa
 function ProductImagePicker({
   selectedIcon,
   selectedImage,
+  existingImageUrl = null,
+  existingImageRemoved = false,
+  onRemoveExisting,
   onIconChange,
   onImageChange,
 }: {
   selectedIcon: string;
   selectedImage: File | null;
+  existingImageUrl?: string | null;
+  existingImageRemoved?: boolean;
+  onRemoveExisting?: () => void;
   onIconChange: (icon: string) => void;
   onImageChange: (image: File | null) => void;
 }) {
@@ -1170,12 +1347,14 @@ function ProductImagePicker({
     return () => URL.revokeObjectURL(url);
   }, [selectedImage]);
 
+  const imagePreviewUrl = previewUrl ?? (existingImageRemoved ? null : existingImageUrl);
+
   return (
     <fieldset className="space-y-2">
       <legend className="text-sm font-medium text-slate-700">Product image or icon</legend>
       <div className="flex items-start gap-3">
         <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-xl bg-blue-50 text-3xl">
-          {previewUrl ? <Image src={previewUrl} alt="Selected product image preview" width={64} height={64} unoptimized className="h-full w-full object-cover" /> : productIcons.find((icon) => icon.id === selectedIcon)?.emoji || "✨"}
+          {imagePreviewUrl ? <Image src={imagePreviewUrl} alt="Product image preview" width={64} height={64} unoptimized className="h-full w-full object-cover" /> : productIcons.find((icon) => icon.id === selectedIcon)?.emoji || "✨"}
         </div>
         <div className="min-w-0 flex-1">
           <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700">
@@ -1189,6 +1368,8 @@ function ProductImagePicker({
           </label>
           {selectedImage ? (
             <button type="button" onClick={() => onImageChange(null)} className="ml-2 text-xs font-medium text-red-500 hover:text-red-700">Remove image</button>
+          ) : existingImageUrl && !existingImageRemoved ? (
+            <button type="button" onClick={onRemoveExisting} className="ml-2 text-xs font-medium text-red-500 hover:text-red-700">Remove current image</button>
           ) : (
             <p className="mt-1.5 text-[11px] text-slate-400">JPEG, PNG or WebP · max 5 MB</p>
           )}
@@ -1215,7 +1396,7 @@ function ProductImagePicker({
   );
 }
 
-function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, onCheckout, onClear, isProcessing }: {
+function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, onCheckout, paymentMethod, onPaymentMethodChange, gcashReferenceLast4, onGcashReferenceChange, onClear, isProcessing }: {
   items: Product[];
   quantities: Record<string, number>;
   count: number;
@@ -1224,6 +1405,10 @@ function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, o
   total: number;
   onChange: (productId: string, difference: number) => void;
   onCheckout: () => void;
+  paymentMethod: "cash" | "gcash";
+  onPaymentMethodChange: (method: "cash" | "gcash") => void;
+  gcashReferenceLast4: string;
+  onGcashReferenceChange: (reference: string) => void;
   onClear: () => void;
   isProcessing: boolean;
 }) {
@@ -1243,16 +1428,43 @@ function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, o
       </div>
       <div className="border-t border-slate-100 px-5 py-4">
         <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(subtotal)}</span></div><div className="flex justify-between text-slate-500"><span>VAT <span className="text-slate-400">(12%)</span></span><span className="font-medium text-slate-700">{money(tax)}</span></div><div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
-        <button type="button" disabled={!count || isProcessing} onClick={onCheckout} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : `Charge ${money(total)}`}</button>
+        <fieldset className="mt-4 space-y-2">
+          <legend className="mb-2 text-xs font-semibold text-slate-700">Payment method</legend>
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" aria-pressed={paymentMethod === "cash"} onClick={() => onPaymentMethodChange("cash")} className={`flex h-10 items-center justify-center gap-2 rounded-lg border text-xs font-semibold ${paymentMethod === "cash" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:border-blue-200"}`}><Banknote size={15} /> Cash</button>
+            <button type="button" aria-pressed={paymentMethod === "gcash"} onClick={() => onPaymentMethodChange("gcash")} className={`flex h-10 items-center justify-center gap-2 rounded-lg border text-xs font-semibold ${paymentMethod === "gcash" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:border-blue-200"}`}><WalletCards size={15} /> GCash</button>
+          </div>
+          {paymentMethod === "gcash" && (
+            <div className="space-y-2 rounded-lg bg-sky-50 p-3">
+              <p className="text-[11px] leading-4 text-sky-800">Confirm the payment in your store&apos;s GCash account, then enter the last 4 digits of its reference number.</p>
+              <label className="block text-[11px] font-medium text-slate-600">GCash reference · last 4 digits
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  maxLength={4}
+                  pattern="[0-9]{4}"
+                  aria-label="Last four digits of GCash reference"
+                  value={gcashReferenceLast4}
+                  onChange={(event) => onGcashReferenceChange(event.currentTarget.value.replace(/\D/g, "").slice(0, 4))}
+                  placeholder="1234"
+                  className="mt-1 h-9 w-full rounded-md border border-sky-200 bg-white px-3 text-sm tracking-[0.2em] outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                />
+              </label>
+            </div>
+          )}
+        </fieldset>
+        <button type="button" disabled={!count || isProcessing} onClick={onCheckout} className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : paymentMethod === "gcash" ? `Record GCash · ${money(total)}` : `Charge ${money(total)}`}</button>
         <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-slate-400"><WalletCards size={13} /> Secure, fast checkout</p>
       </div>
     </aside>
   );
 }
 
-function InventoryView({ products, onAdd, onRemove, onImport, isImporting, onRestock }: {
+function InventoryView({ products, onAdd, onEditImage, onRemove, onImport, isImporting, onRestock }: {
   products: Product[];
   onAdd: () => void;
+  onEditImage: (product: Product) => void;
   onRemove: (product: Product) => void;
   onImport: (file: File) => void;
   isImporting: boolean;
@@ -1276,7 +1488,7 @@ function InventoryView({ products, onAdd, onRemove, onImport, isImporting, onRes
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
       </div>
     </section>
   );
@@ -1308,7 +1520,7 @@ function OrdersView({ orders }: { orders: Order[] }) {
       <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Orders</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Recent orders</h1><p className="mt-1 text-sm text-slate-500">A quick look at your latest transactions.</p></div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Order history</h2><p className="mt-1 text-xs text-slate-400">{orders.length} recent transactions</p></div><span className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[11px] font-medium text-emerald-700"><Check size={13} /> All up to date</span></div>
-        <div className="divide-y divide-slate-100">{orders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p></div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
+        <div className="divide-y divide-slate-100">{orders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p><p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">{order.paymentMethod === "gcash" ? `GCash · Ref •••• ${order.gcashReferenceLast4 ?? "—"}` : "Cash"}</p></div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
         {orders.length === 0 && <div className="py-16 text-center text-sm text-slate-400">No orders yet. Completed sales will show up here.</div>}
       </div>
     </section>
