@@ -7,7 +7,8 @@ as $$
 declare
   v_deleted_orders bigint;
 begin
-  delete from public.orders;
+  delete from public.orders
+    where id is not null;
   get diagnostics v_deleted_orders = row_count;
   return v_deleted_orders;
 end;
