@@ -286,7 +286,7 @@ export default function Home() {
   const [readNotifications, setReadNotifications] = useState<string[]>([]);
   const [category, setCategory] = useState("All items");
   const [search, setSearch] = useState("");
-  const [activePage, setActivePage] = useState<"dashboard" | "pos" | "inventory" | "orders" | "employees">("pos");
+  const [activePage, setActivePage] = useState<"dashboard" | "pos" | "inventory" | "orders" | "employees" | "account">("pos");
   const [showAddProduct, setShowAddProduct] = useState(false);
   const [selectedProductIcon, setSelectedProductIcon] = useState("auto");
   const [selectedProductImage, setSelectedProductImage] = useState<File | null>(null);
@@ -295,6 +295,8 @@ export default function Home() {
   const [showHelpCenter, setShowHelpCenter] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "gcash">("cash");
   const [gcashReferenceLast4, setGcashReferenceLast4] = useState("");
+  const [accountEmail, setAccountEmail] = useState("");
+  const [salesResetConfirmation, setSalesResetConfirmation] = useState("");
   const [notice, setNotice] = useState("");
   const [authError, setAuthError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -319,8 +321,7 @@ export default function Home() {
   const cartItems = products.filter((product) => cart[product.id]);
   const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0);
   const subtotal = cartItems.reduce((total, product) => total + product.price * cart[product.id], 0);
-  const tax = Math.round(subtotal * 0.12 * 100) / 100;
-  const total = Math.round((subtotal + tax) * 100) / 100;
+  const total = Math.round(subtotal * 100) / 100;
   const notifications = [
     ...products
       .filter((product) => product.stock <= 5)
@@ -360,6 +361,7 @@ export default function Home() {
         if (cancelled) return;
         setRole(profile.role);
         setEmployeeName(profile.full_name || user.email || "Team member");
+        setAccountEmail(user.email ?? "");
         setProducts(workspace.products);
         setOrders(workspace.orders);
         setDashboardStats(workspace.stats);
@@ -487,6 +489,7 @@ export default function Home() {
       }
       const workspace = await fetchWorkspaceData(profile.role === "admin", salesPeriod);
       setEmployeeName(profile.full_name || authData.user.email || "Team member");
+      setAccountEmail(authData.user.email ?? "");
       setProducts(workspace.products);
       setOrders(workspace.orders);
       setDashboardStats(workspace.stats);
@@ -710,6 +713,81 @@ export default function Home() {
     setCart({});
   }
 
+  async function updateAccountEmail(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const email = String(formData.get("email") ?? "").trim();
+    if (!email || email.toLowerCase() === accountEmail.toLowerCase()) {
+      setNotice("Enter a different, valid email address.");
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.updateUser({ email });
+      if (error) throw error;
+      setNotice("Email change requested. Follow the confirmation instructions sent by Supabase before signing in with the new address.");
+      form.reset();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Unable to update account email.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function updateAccountPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const password = String(formData.get("password") ?? "");
+    const confirmPassword = String(formData.get("confirmPassword") ?? "");
+    if (password.length < 8) {
+      setNotice("Choose a password with at least 8 characters.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setNotice("The new passwords do not match.");
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) throw error;
+      form.reset();
+      setNotice("Your password has been updated.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Unable to update account password.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function resetSalesHistory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (role !== "admin" || salesResetConfirmation !== "RESET SALES HISTORY") {
+      setNotice("Enter RESET SALES HISTORY exactly to confirm this admin-only action.");
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.rpc("reset_sales_history", {
+        p_confirmation: salesResetConfirmation,
+      });
+      if (error) throw error;
+      setOrders([]);
+      setDashboardStats((current) => current ? { ...current, sales_total: 0, orders_today: 0 } : current);
+      setSalesResetConfirmation("");
+      setNotice(`${Number(data)} sales order${Number(data) === 1 ? "" : "s"} and their item history permanently deleted. Products, stock, employees, and stock movements were not changed.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Unable to reset sales history.");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function loadEmployees() {
     const response = await fetch("/api/admin/employees");
     const data = await response.json();
@@ -912,13 +990,14 @@ export default function Home() {
               {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
               {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
               <SidebarLink icon={ClipboardList} label="Orders" active={currentView === "orders"} onClick={() => setActivePage("orders")} />
+              <SidebarLink icon={UserRound} label="Account" active={currentView === "account"} onClick={() => setActivePage("account")} />
             </nav>
           </div>
-          <div className="mt-auto rounded-2xl bg-[#f2f6ff] p-4">
-            <div className="mb-3 grid h-9 w-9 place-items-center rounded-xl bg-white text-blue-600 shadow-sm"><CircleHelpIcon /></div>
+          <div className="mt-auto rounded-2xl bg-[#f2f6ff] p-4 dark:bg-slate-800">
+            <div className="mb-3 grid h-9 w-9 place-items-center rounded-xl bg-white text-blue-600 shadow-sm dark:bg-slate-700 dark:text-blue-300"><CircleHelpIcon /></div>
             <p className="text-sm font-semibold">Need a hand?</p>
-            <p className="mt-1 text-xs leading-5 text-slate-500">Your store team is here to help you out.</p>
-            <button type="button" onClick={() => setShowHelpCenter(true)} className="mt-3 text-xs font-semibold text-blue-700">Visit help center <ArrowRight size={12} className="ml-1 inline" /></button>
+            <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-300">Your store team is here to help you out.</p>
+            <button type="button" onClick={() => setShowHelpCenter(true)} className="mt-3 text-xs font-semibold text-blue-700 dark:text-blue-300">Visit help center <ArrowRight size={12} className="ml-1 inline" /></button>
           </div>
           <button type="button" onClick={() => void signOut()} className="mt-5 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800">
             <LogOut size={17} /> Sign out
@@ -970,6 +1049,7 @@ export default function Home() {
             {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
             {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
             <SidebarLink icon={ClipboardList} label="Orders" active={currentView === "orders"} onClick={() => setActivePage("orders")} />
+            <SidebarLink icon={UserRound} label="Account" active={currentView === "account"} onClick={() => setActivePage("account")} />
           </nav>
 
           <div className="p-4 sm:p-7 xl:p-9">
@@ -1028,6 +1108,17 @@ export default function Home() {
                 employees={employees}
                 onAdd={() => setShowAddEmployee(true)}
                 onRemove={removeEmployee}
+              />
+            ) : currentView === "account" ? (
+              <AccountView
+                email={accountEmail}
+                role={role}
+                isProcessing={isLoading}
+                salesResetConfirmation={salesResetConfirmation}
+                onSalesResetConfirmationChange={setSalesResetConfirmation}
+                onUpdateEmail={updateAccountEmail}
+                onUpdatePassword={updateAccountPassword}
+                onResetSalesHistory={resetSalesHistory}
               />
             ) : currentView === "inventory" && isAdmin ? (
               <InventoryView
@@ -1101,7 +1192,6 @@ export default function Home() {
                   quantities={cart}
                   count={itemCount}
                   subtotal={subtotal}
-                  tax={tax}
                   total={total}
                   onChange={changeQuantity}
                   onCheckout={checkout}
@@ -1396,12 +1486,11 @@ function ProductImagePicker({
   );
 }
 
-function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, onCheckout, paymentMethod, onPaymentMethodChange, gcashReferenceLast4, onGcashReferenceChange, onClear, isProcessing }: {
+function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, paymentMethod, onPaymentMethodChange, gcashReferenceLast4, onGcashReferenceChange, onClear, isProcessing }: {
   items: Product[];
   quantities: Record<string, number>;
   count: number;
   subtotal: number;
-  tax: number;
   total: number;
   onChange: (productId: string, difference: number) => void;
   onCheckout: () => void;
@@ -1427,7 +1516,7 @@ function CartPanel({ items, quantities, count, subtotal, tax, total, onChange, o
         </li>)}</ul> : <div className="flex min-h-[180px] flex-col items-center justify-center text-center"><div className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-500"><ShoppingCart size={20} /></div><p className="mt-3 text-xs font-semibold text-slate-700">Your order is empty</p><p className="mt-1 text-[11px] text-slate-400">Add a product to get started.</p></div>}
       </div>
       <div className="border-t border-slate-100 px-5 py-4">
-        <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(subtotal)}</span></div><div className="flex justify-between text-slate-500"><span>VAT <span className="text-slate-400">(12%)</span></span><span className="font-medium text-slate-700">{money(tax)}</span></div><div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
+        <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(subtotal)}</span></div><div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
         <fieldset className="mt-4 space-y-2">
           <legend className="mb-2 text-xs font-semibold text-slate-700">Payment method</legend>
           <div className="grid grid-cols-2 gap-2">
@@ -1510,6 +1599,53 @@ function EmployeeView({ employees, onAdd, onRemove }: {
         {employees.length > 0 ? <div className="divide-y divide-slate-100">{employees.map((employee) => <div key={employee.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-blue-50 text-sm font-bold text-blue-700">{employee.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div><div className="min-w-0"><p className="truncate text-sm font-semibold">{employee.full_name}</p><p className="mt-1 truncate text-xs text-slate-400">{employee.email}</p></div></div><div className="flex items-center gap-3"><span className="hidden rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700 sm:inline">Employee</span><button type="button" aria-label={`Remove ${employee.full_name}`} onClick={() => onRemove(employee)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></div>)}</div> : <div className="grid min-h-48 place-items-center text-center"><div><Users size={26} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No employees yet</p><p className="mt-1 text-xs text-slate-400">Create accounts for the people on your team.</p></div></div>}
       </div>
       <p className="mt-4 text-xs text-slate-400">Employee passwords are created by admins and should be shared securely. Employee accounts cannot access inventory or team settings.</p>
+    </section>
+  );
+}
+
+function AccountView({
+  email,
+  role,
+  isProcessing,
+  salesResetConfirmation,
+  onSalesResetConfirmationChange,
+  onUpdateEmail,
+  onUpdatePassword,
+  onResetSalesHistory,
+}: {
+  email: string;
+  role: Role;
+  isProcessing: boolean;
+  salesResetConfirmation: string;
+  onSalesResetConfirmationChange: (value: string) => void;
+  onUpdateEmail: (event: FormEvent<HTMLFormElement>) => void;
+  onUpdatePassword: (event: FormEvent<HTMLFormElement>) => void;
+  onResetSalesHistory: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <section className="mx-auto max-w-3xl">
+      <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Account</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Account settings</h1><p className="mt-1 text-sm text-slate-500">Manage your sign-in details and store history.</p></div>
+      <div className="space-y-5">
+        <form onSubmit={onUpdateEmail} className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+          <div className="mb-4"><h2 className="text-sm font-semibold">Email address</h2><p className="mt-1 text-xs leading-5 text-slate-500">A confirmation email may be required before your new address becomes active.</p></div>
+          <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">Current email<input disabled value={email} className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300" /></label>
+          <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">New email address<input required type="email" name="email" autoComplete="email" placeholder="you@yourstore.com" className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
+          <button type="submit" disabled={isProcessing} className="mt-4 h-10 rounded-lg bg-blue-600 px-4 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isProcessing ? "Saving…" : "Update email"}</button>
+        </form>
+        <form onSubmit={onUpdatePassword} className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+          <div className="mb-4"><h2 className="text-sm font-semibold">Change password</h2><p className="mt-1 text-xs leading-5 text-slate-500">Use at least 8 characters. Your password is managed securely by Supabase Auth.</p></div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">New password<input required minLength={8} type="password" name="password" autoComplete="new-password" className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
+            <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">Confirm new password<input required minLength={8} type="password" name="confirmPassword" autoComplete="new-password" className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
+          </div>
+          <button type="submit" disabled={isProcessing} className="mt-4 h-10 rounded-lg bg-blue-600 px-4 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isProcessing ? "Saving…" : "Update password"}</button>
+        </form>
+        {role === "admin" && <form onSubmit={onResetSalesHistory} className="rounded-2xl border border-red-200 bg-red-50/70 p-5 dark:border-red-900/70 dark:bg-red-950/30 sm:p-6">
+          <div className="mb-4 flex items-start gap-3"><div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-red-100 text-red-700 dark:bg-red-900/60 dark:text-red-200"><Trash2 size={17} /></div><div><h2 className="text-sm font-semibold text-red-900 dark:text-red-100">Reset sales history</h2><p className="mt-1 text-xs leading-5 text-red-800/80 dark:text-red-200/80">Permanently deletes all orders and their order items. Products, current stock, employee accounts, and stock movement history are not changed. This cannot be undone.</p></div></div>
+          <label className="block text-xs font-medium text-red-900 dark:text-red-100">Type RESET SALES HISTORY to confirm<input required value={salesResetConfirmation} onChange={(event) => onSalesResetConfirmationChange(event.currentTarget.value)} autoComplete="off" className="mt-1.5 h-10 w-full rounded-lg border border-red-200 bg-white px-3 text-sm outline-none focus:border-red-500 focus:ring-4 focus:ring-red-100 dark:border-red-900 dark:bg-slate-950 dark:text-white dark:focus:ring-red-950" /></label>
+          <button type="submit" disabled={isProcessing || salesResetConfirmation !== "RESET SALES HISTORY"} className="mt-4 h-10 rounded-lg bg-red-600 px-4 text-xs font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50">{isProcessing ? "Resetting…" : "Permanently delete sales history"}</button>
+        </form>}
+      </div>
     </section>
   );
 }

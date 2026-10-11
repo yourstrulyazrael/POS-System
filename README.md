@@ -118,11 +118,11 @@ Product imports accept CSV headers `name,category,price,stock` or a JSON array o
 
 When adding or editing an item in the admin inventory, product artwork can be auto-detected from its name/category, selected from the preset icon grid, or uploaded as a JPEG, PNG, or WebP image (up to 5 MB). Custom images are stored in the `product-images` Supabase Storage bucket.
 
-Checkout supports Cash and GCash. For GCash, staff must verify the transfer in the store's GCash account and enter the last four digits of its reference number. The POS stores those digits for transaction records; it does not process or automatically verify GCash transfers.
+Checkout supports Cash and GCash and charges the product subtotal without VAT. For GCash, staff must verify the transfer in the store's GCash account and enter the last four digits of its reference number. The POS stores those digits for transaction records; it does not process or automatically verify GCash transfers. Existing historical orders are retained as recorded; only new orders use the no-VAT total.
 
-For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports; the product images migration enables preset icons and admin-only image uploads; and the payment migration stores the payment method and GCash reference digits with each order.
+For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports; the product images migration enables preset icons and admin-only image uploads; the payment migration stores the payment method and GCash reference digits with each order; and the account tools migration disables VAT for new orders and adds guarded admin sales-history reset.
 
-Dark mode is available from the theme control and remembers the selected theme.
+The **Account** panel lets each signed-in user request an email change or set a new password. Admins can also permanently delete order and order-item history there; this does not reset products, stock, employee accounts, or stock movement history. Dark mode is available from the theme control and remembers the selected theme.
 
 ## Feedback and issues
 
