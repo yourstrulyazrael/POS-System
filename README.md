@@ -71,6 +71,15 @@ If the connection drops, a cashier who is already signed in can keep selling:
 - Synced sales keep their original time, cashier and the prices actually charged. If offline sales sold more than the recorded stock, stock stops at 0 and the product appears under **Recount needed** in Inventory (`stock_shortfalls`).
 - Online-only: signing in, inventory/employee/account changes, imports, analytics and shift reports.
 
+Anyone who signed in online on a computer in the last 30 days can also **sign in offline** there: the app stores a PBKDF2 password verifier (never the password). Once back online, a blue bar asks for the password once to reconnect and sync.
+
+## Refunds, receipts, cash drawer
+
+- **Voids and refunds** (Orders → ⋮): a void cancels a whole sale and restocks it (the cashier within 30 minutes, admins any time); a refund returns some or all items, optionally restocked, by cash, e-wallet or card (admins). Reports show sales after refunds. Online only.
+- **Receipts**: 58 mm or 80 mm thermal receipts for sales, refunds/voids and the end-of-shift report. Set the printer per computer in Account → Receipts & cash drawer; admins set the store name, address and footer (store_settings). The desktop app prints silently; the browser uses the print dialog.
+- **Cash drawer**: opened by the printer driver, or directly by the desktop app via a network ESC/POS printer (port 9100) or a shared Windows printer.
+- **End-of-shift cash count**: start a shift with the opening cash (wallet icon), close it by counting notes and coins. The till shows expected vs counted (over/short) and prints the report; the count syncs to Shifts → Cash counts, where the database's own expected-cash check is shown too. Works offline.
+
 ## Project layout
 
 | Path | What it is |
@@ -80,6 +89,11 @@ If the connection drops, a cashier who is already signed in can keep selling:
 | `lib/supabase/client.ts` | Supabase client (session stored locally) and the `pos-admin` caller |
 | `lib/product-import.ts` | Excel/CSV/JSON import parsing and `.xlsx` template/export writing |
 | `lib/offline-store.ts` | IndexedDB queue of offline sales and the offline workspace cache |
+| `lib/offline-auth.ts` | Offline sign-in password verifiers (PBKDF2) |
+| `lib/cash-session.ts` | Cash drawer sessions (end-of-shift count), offline-first |
+| `lib/receipts.ts`, `lib/hardware.ts` | Receipt layouts; printer and cash drawer access |
+| `components/pos-dialogs.tsx` | Refund/void, cash drawer, reconnect and hardware-settings UI |
+| `electron/preload.cjs` | Narrow printing/drawer bridge exposed to the page |
 | `supabase/migrations/` | Database schema, row-level security and functions |
 | `supabase/functions/pos-admin/` | Edge Function for account management |
 | `electron/main.cjs` | Desktop shell: serves `out/` over `app://`, sandboxed window, CSP |
