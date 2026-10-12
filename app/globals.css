@@ -148,3 +148,35 @@ html.dark input,
 html.dark select {
   color: #e2e8f0;
 }
+
+@media print {
+  body {
+    background: #fff !important;
+    color: #111827 !important;
+  }
+
+  .analytics-report-page {
+    background: #fff !important;
+  }
+
+  .analytics-no-print {
+    display: none !important;
+  }
+
+  .analytics-print-card {
+    break-inside: avoid;
+    border-color: #cbd5e1 !important;
+    box-shadow: none !important;
+  }
+
+  html.dark .analytics-print-card,
+  html.dark .analytics-print-card * {
+    color: #111827 !important;
+  }
+
+  html.dark [class~="bg-white"],
+  html.dark [class~="bg-slate-50"],
+  html.dark [class~="bg-slate-800"] {
+    background-color: #fff !important;
+  }
+}

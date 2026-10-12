@@ -2,6 +2,7 @@
 
 import {
   ArrowRight,
+  BarChart3,
   Bell,
   Boxes,
   Check,
@@ -48,6 +49,7 @@ type Product = {
   name: string;
   category: string;
   costPrice: number;
+  costPriceKnown: boolean;
   wholesalePrice: number;
   price: number;
   stock: number;
@@ -58,7 +60,7 @@ type Product = {
 };
 type Order = { id: string; items: number; total: number; time: string; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string };
 type SalesChartPoint = { label: string; cash: number; eWallet: number; card: number };
-type ProductRow = { id: string; name: string; category: string; cost_price: number; wholesale_price: number; price: number; stock: number; image_icon: string | null; image_url: string | null };
+type ProductRow = { id: string; name: string; category: string; cost_price: number; cost_price_known: boolean; wholesale_price: number; price: number; stock: number; image_icon: string | null; image_url: string | null };
 type OrderRow = {
   id: string;
   total: number;
@@ -151,7 +153,7 @@ function productAppearance(name: string, category: string, index: number, imageI
 async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod = "today") {
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
-    supabase.from("products").select("id, name, category, cost_price, wholesale_price, price, stock, image_icon, image_url").eq("active", true).order("name").returns<ProductRow[]>(),
+    supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url").eq("active", true).order("name").returns<ProductRow[]>(),
     supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
@@ -194,6 +196,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
     products: productsResult.data.map((product, index) => ({
       ...product,
       costPrice: Number(product.cost_price),
+      costPriceKnown: product.cost_price_known,
       wholesalePrice: Number(product.wholesale_price),
       price: Number(product.price),
       imageIcon: product.image_icon ?? "auto",
@@ -276,7 +279,8 @@ function validateImportedProducts(value: unknown[]) {
     const item = record as Record<string, unknown>;
     const name = typeof item.name === "string" ? item.name.trim() : "";
     const category = typeof item.category === "string" ? item.category.trim() : "";
-    const costPrice = item.cost_price === undefined || item.cost_price === "" ? 0 : Number(item.cost_price);
+    const costPriceProvided = item.cost_price !== undefined && item.cost_price !== null && item.cost_price !== "";
+    const costPrice = costPriceProvided ? Number(item.cost_price) : 0;
     const wholesalePrice = item.wholesale_price === undefined || item.wholesale_price === "" ? 0 : Number(item.wholesale_price);
     const price = Number(item.retail_price ?? item.price);
     const stock = Number(item.stock);
@@ -298,7 +302,15 @@ function validateImportedProducts(value: unknown[]) {
     ) {
       throw new Error(`Product row ${index + 1} needs a name, category, non-negative cost and wholesale prices, a positive retail price, and non-negative whole-number stock.`);
     }
-    return { name, category, cost_price: costPrice, wholesale_price: wholesalePrice, price, stock, image_icon: imageIcon };
+    return {
+      name,
+      category,
+      ...(costPriceProvided ? { cost_price: costPrice, cost_price_known: true } : {}),
+      ...(item.wholesale_price !== undefined && item.wholesale_price !== null && item.wholesale_price !== "" ? { wholesale_price: wholesalePrice } : {}),
+      price,
+      stock,
+      image_icon: imageIcon,
+    };
   });
 }
 
@@ -599,6 +611,7 @@ export default function Home() {
         name,
         category: selectedCategory,
         cost_price: costPrice,
+        cost_price_known: true,
         wholesale_price: wholesalePrice,
         price,
         stock,
@@ -664,6 +677,7 @@ export default function Home() {
       const supabase = createClient();
       const { error } = await supabase.from("products").update({
         cost_price: costPrice,
+        cost_price_known: true,
         wholesale_price: wholesalePrice,
         price: retailPrice,
       }).eq("id", editingProductPrices.id);
@@ -1103,6 +1117,7 @@ export default function Home() {
             <p className="mb-3 px-3 text-[10px] font-bold tracking-[0.16em] text-slate-400">WORKSPACE</p>
             <nav className="space-y-1">
               {isAdmin && <SidebarLink icon={LayoutDashboard} label="Dashboard" active={currentView === "dashboard"} onClick={() => setActivePage("dashboard")} />}
+              {isAdmin && <Link href="/analytics" className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800 dark:hover:bg-slate-800"><BarChart3 size={17} /> Analytics &amp; Reports</Link>}
               <SidebarLink icon={ShoppingCart} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
               {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
               {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
@@ -1400,7 +1415,7 @@ export default function Home() {
               <button type="button" aria-label="Close price editor" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
             </div>
             <form onSubmit={saveProductPrices} className="space-y-4">
-              <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.costPrice} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.costPriceKnown ? editingProductPrices.costPrice : ""} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Wholesale price (₱)<input required name="wholesale_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.wholesalePrice} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" defaultValue={editingProductPrices.price} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button><button disabled={isLoading} type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : "Save prices"}</button></div>
@@ -1495,6 +1510,7 @@ function AdminOverview({
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Dashboard</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Store dashboard</h1><p className="mt-1 text-sm text-slate-500">Live sales, team, and inventory performance.</p></div>
         <div className="flex flex-wrap items-center gap-2">
+          <Link href="/analytics" className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><BarChart3 size={14} /> Analytics &amp; Reports</Link>
           <select aria-label="Sales report period" value={period} onChange={(event) => onPeriodChange(event.target.value as SalesPeriod)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold outline-none focus:border-blue-400">
             <option value="today">Today</option><option value="7days">Last 7 days</option><option value="30days">Last 30 days</option>
           </select>
@@ -1787,7 +1803,7 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{money(product.costPrice)}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditPrices(product)} aria-label={`Edit prices for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><CircleDollarSign size={14} /> Prices</button><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditPrices(product)} aria-label={`Edit prices for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><CircleDollarSign size={14} /> Prices</button><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
       </div>
     </section>
   );
