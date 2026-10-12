@@ -681,19 +681,19 @@ export default function Home() {
     }
   }
 
-  const navItems: { page: Page; label: string; shortLabel: string; icon: LucideIcon }[] = [
+  const navItems: { page: Page; label: string; icon: LucideIcon }[] = [
     ...(role === "admin" ? [
-      { page: "dashboard" as const, label: "Dashboard", shortLabel: "Dashboard", icon: LayoutDashboard },
-      { page: "analytics" as const, label: "Analytics & Reports", shortLabel: "Analytics", icon: BarChart3 },
+      { page: "dashboard" as const, label: "Dashboard", icon: LayoutDashboard },
+      { page: "analytics" as const, label: "Analytics & Reports", icon: BarChart3 },
     ] : []),
-    { page: "pos", label: "Point of sale", shortLabel: "Point of sale", icon: ShoppingCart },
+    { page: "pos", label: "Point of sale", icon: ShoppingCart },
     ...(role === "admin" ? [
-      { page: "inventory" as const, label: "Inventory", shortLabel: "Inventory", icon: Boxes },
-      { page: "employees" as const, label: "Employees", shortLabel: "Employees", icon: Users },
+      { page: "inventory" as const, label: "Inventory", icon: Boxes },
+      { page: "employees" as const, label: "Employees", icon: Users },
     ] : []),
-    { page: "orders", label: "Orders", shortLabel: "Orders", icon: ClipboardList },
-    { page: "shifts", label: "Shifts", shortLabel: "Shifts", icon: CalendarClock },
-    { page: "account", label: "Account", shortLabel: "Account", icon: UserRound },
+    { page: "orders", label: "Orders", icon: ClipboardList },
+    { page: "shifts", label: "Shifts", icon: CalendarClock },
+    { page: "account", label: "Account", icon: UserRound },
   ];
 
   function closeTopDialog() {
@@ -1492,35 +1492,18 @@ export default function Home() {
   return (
     <main className={`min-h-screen bg-[#f5f8fd] text-slate-900 dark:bg-slate-950 dark:text-slate-100 ${currentView === "analytics" ? "analytics-report-print-mode" : ""}`}>
       <div className="flex min-h-screen">
-        <aside className="hidden w-[248px] shrink-0 flex-col border-r border-slate-100 bg-white px-5 py-6 dark:border-slate-800 dark:bg-slate-900 lg:flex">
-          <Brand />
-          <div className="mt-10">
-            <p className="mb-3 px-3 text-[10px] font-bold tracking-[0.16em] text-slate-400">WORKSPACE</p>
-            <nav className="space-y-1">
-              {navItems.map((item, index) => <SidebarLink key={item.page} icon={item.icon} label={item.label} shortcut={`Alt+${index + 1}`} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
-            </nav>
-          </div>
-          <div className="mt-auto rounded-2xl bg-[#f2f6ff] p-4 dark:bg-slate-800">
-            <div className="mb-3 grid h-9 w-9 place-items-center rounded-xl bg-white text-blue-600 shadow-sm dark:bg-slate-700 dark:text-blue-300"><CircleHelpIcon /></div>
-            <p className="text-sm font-semibold">Need a hand?</p>
-            <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-300">Your store team is here to help you out.</p>
-            <button type="button" onClick={() => setShowHelpCenter(true)} aria-keyshortcuts="F1" className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300">Visit help center <Kbd>F1</Kbd></button>
-          </div>
-          <button type="button" onClick={() => void signOut()} className="mt-5 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800">
-            <LogOut size={17} /> Sign out
-          </button>
-        </aside>
-
         <div className="min-w-0 flex-1">
-          <header className="sticky top-0 z-20 flex h-[72px] items-center justify-between border-b border-slate-100 bg-white/95 px-4 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95 sm:px-7 xl:px-9">
-            <div className="flex items-center gap-3 lg:hidden"><Brand compact /></div>
-            <div className="hidden lg:block">
-              <p className="text-sm font-semibold">{isAdmin ? "Store overview" : "Good morning, " + employeeName.split(" ")[0] + " 👋"}</p>
-              <p className="mt-0.5 text-xs text-slate-400">Here’s what’s happening in your store today.</p>
-            </div>
-            <div className="flex items-center gap-2 sm:gap-4">
+          <header className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
+            <div className="flex h-[72px] items-center gap-3 px-4 sm:px-7 xl:px-9">
+            <div className="shrink-0 xl:hidden"><Brand compact /></div>
+            <div className="hidden shrink-0 xl:block"><Brand /></div>
+            {/* Page icons; the name (and Alt+N shortcut) appears on hover or focus. */}
+            <nav aria-label="Workspace navigation" className="hidden flex-1 items-center justify-center gap-1 md:flex">
+              {navItems.map((item, index) => <NavIcon key={item.page} icon={item.icon} label={item.label} shortcut={`Alt+${index + 1}`} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
+            </nav>
+            <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3">
               <button type="button" aria-label="Open help center (F1)" title="Help (F1)" aria-keyshortcuts="F1" onClick={() => setShowHelpCenter(true)} className="grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={19} /></button>
-              <div className="hidden items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600 sm:flex">
+              <div className="hidden items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300 lg:flex">
                 <Clock3 size={14} className="text-slate-400" />
                 {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
               </div>
@@ -1538,21 +1521,22 @@ export default function Home() {
                 </div>}
               </div>
               <ThemeSwitcher />
-              <div className="h-8 w-px bg-slate-100" />
+              <div className="hidden h-8 w-px bg-slate-100 dark:bg-slate-800 sm:block" />
               <div className="flex items-center gap-2.5">
                 <div className="grid h-9 w-9 place-items-center rounded-full bg-blue-100 text-xs font-bold text-blue-700">{employeeName.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div>
-                <div className="hidden sm:block">
+                <div className="hidden xl:block">
                   <p className="text-xs font-semibold">{employeeName}</p>
                   <p className="mt-0.5 text-[10px] capitalize text-slate-400">{role}</p>
                 </div>
-                <button type="button" aria-label="Sign out" onClick={() => void signOut()} className="ml-1 rounded-lg p-2 text-slate-400 hover:bg-slate-50 hover:text-slate-700"><LogOut size={16} /></button>
+                <button type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800"><LogOut size={16} /></button>
               </div>
             </div>
+            </div>
+            {/* Phones: the same icons on a second row of the sticky header. */}
+            <nav aria-label="Workspace navigation" className="flex justify-around gap-1 overflow-x-auto border-t border-slate-100 px-2 py-1.5 dark:border-slate-800 md:hidden">
+              {navItems.map((item) => <NavIcon key={item.page} icon={item.icon} label={item.label} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
+            </nav>
           </header>
-
-          <nav aria-label="Workspace navigation" className="flex gap-1 overflow-x-auto border-b border-slate-100 bg-white px-4 py-2 dark:border-slate-800 dark:bg-slate-900 lg:hidden">
-            {navItems.map((item) => <SidebarLink key={item.page} icon={item.icon} label={item.shortLabel} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
-          </nav>
 
           <div className="p-4 sm:p-7 xl:p-9">
             {notice && (
@@ -1915,14 +1899,22 @@ function Brand({ light = false, compact = false }: { light?: boolean; compact?: 
   );
 }
 
-function CircleHelpIcon() {
-  return <CircleHelp size={17} />;
-}
-
-function SidebarLink({ icon: Icon, label, shortcut, active, onClick }: { icon: LucideIcon; label: string; shortcut?: string; active: boolean; onClick: () => void }) {
+// Icon-only navigation button; its name shows in a tooltip on hover or
+// keyboard focus, and is always available to screen readers.
+function NavIcon({ icon: Icon, label, shortcut, active, onClick }: { icon: LucideIcon; label: string; shortcut?: string; active: boolean; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick} aria-keyshortcuts={shortcut} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-medium transition ${active ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}>
-      <Icon size={17} strokeWidth={active ? 2.2 : 1.8} /><span className="flex-1 text-left">{label}</span>{shortcut && <Kbd>{shortcut}</Kbd>}
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      aria-current={active ? "page" : undefined}
+      aria-keyshortcuts={shortcut}
+      className={`group relative grid h-10 w-10 shrink-0 place-items-center rounded-xl transition ${active ? "bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300" : "text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"}`}
+    >
+      <Icon size={19} strokeWidth={active ? 2.2 : 1.8} />
+      <span aria-hidden="true" className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-hover:delay-150 group-focus-visible:opacity-100 dark:bg-slate-700">
+        {label}{shortcut && <span className="ml-1.5 text-slate-400">{shortcut}</span>}
+      </span>
     </button>
   );
 }
@@ -2125,7 +2117,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           <h3 className="text-sm font-semibold">Keyboard shortcuts</h3>
           <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
             {([
-              ["Alt + 1–9", "Go to a page (numbers shown in the sidebar)"],
+              ["Alt + 1–9", "Go to a page (hover a page icon in the top bar to see its number)"],
               ["Type or scan", "On Point of sale, starts a search or barcode entry"],
               ["24/ + scan", "Adds 24 of the scanned item (any quantity up to 9,999)"],
               ["Enter", "Add the scanned or only matching item · confirm a dialog"],
