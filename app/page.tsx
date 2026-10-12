@@ -70,7 +70,8 @@ type Product = {
   emoji: string;
   color: string;
 };
-type Order = { id: string; items: number; total: number; time: string; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string; isWholesale: boolean };
+type OrderLine = { name: string; quantity: number; unitPrice: number; custom: boolean };
+type Order = { id: string; fullId: string; items: number; total: number; time: string; createdAt: Date; lines: OrderLine[]; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string; isWholesale: boolean };
 type SalesChartPoint = { label: string; cash: number; eWallet: number; card: number };
 type ProfitReportPoint = {
   label: string;
@@ -95,7 +96,7 @@ type OrderRow = {
   id: string;
   total: number;
   created_at: string;
-  order_items: { quantity: number }[];
+  order_items: { quantity: number; product_name: string; unit_price: number | string; product_id: string | null }[];
   payment_method: PaymentMethod;
   payment_reference_last4: string | null;
   cash_received: number | string | null;
@@ -177,7 +178,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
     supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url, barcode").eq("active", true).order("name").returns<ProductRow[]>(),
-    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
+    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, order_items(quantity, product_name, unit_price, product_id)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
   if (ordersResult.error) throw new Error(`Unable to load orders: ${ordersResult.error.message}`);
@@ -229,6 +230,10 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
     })),
     orders: ordersResult.data.map((order) => ({
       id: `#${order.id.slice(0, 8)}`,
+      fullId: order.id,
+      createdAt: new Date(order.created_at),
+      // A line without a product_id is a custom item (or a since-deleted product).
+      lines: order.order_items.map((item) => ({ name: item.product_name, quantity: item.quantity, unitPrice: Number(item.unit_price), custom: item.product_id === null })),
       items: order.order_items.reduce((sum, item) => sum + item.quantity, 0),
       total: Number(order.total),
       time: new Date(order.created_at).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
@@ -1500,7 +1505,7 @@ export default function Home() {
             <div className="shrink-0 xl:hidden"><Brand compact /></div>
             <div className="hidden shrink-0 xl:block"><Brand /></div>
             {/* Page icons; the name (and Alt+N shortcut) appears on hover or focus. */}
-            <nav aria-label="Workspace navigation" className="hidden flex-1 items-center justify-center gap-1 md:flex">
+            <nav aria-label="Workspace navigation" className="ml-2 hidden flex-1 items-center gap-1 md:flex xl:ml-6">
               {navItems.map((item, index) => <NavIcon key={item.page} icon={item.icon} label={item.label} shortcut={`Alt+${index + 1}`} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
             </nav>
             <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3">
@@ -2555,22 +2560,115 @@ function AccountView({
   );
 }
 
+
+const orderDateTime = (date: Date) => ({
+  date: date.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Manila" }),
+  time: date.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
+});
+
 function OrdersView({ orders }: { orders: Order[] }) {
   const [paymentFilter, setPaymentFilter] = useState<"all" | PaymentMethod>("all");
+  const [detailsOrder, setDetailsOrder] = useState<Order | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const visibleOrders = orders.filter((order) => paymentFilter === "all" || order.paymentMethod === paymentFilter);
+
+  async function copyOrderId(order: Order) {
+    try {
+      await navigator.clipboard.writeText(order.fullId);
+      setCopiedId(order.fullId);
+      window.setTimeout(() => setCopiedId((current) => (current === order.fullId ? null : current)), 2000);
+    } catch {
+      setCopiedId(null);
+    }
+  }
+
   return (
     <section>
       <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Orders</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Recent orders</h1><p className="mt-1 text-sm text-slate-500">A quick look at your latest transactions.</p></div>
-      <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
-        <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center">
+      <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800 sm:flex-row sm:items-center">
           <div><h2 className="text-sm font-semibold">Order history</h2><p className="mt-1 text-xs text-slate-400">Showing {visibleOrders.length} of {orders.length} recent transactions</p></div>
-          <div className="flex gap-1 rounded-lg bg-slate-50 p-1" aria-label="Filter orders by payment method">
-            {(["all", "cash", "e_wallet", "card"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : paymentMethodLabel(method)}</button>)}
+          <div className="flex gap-1 rounded-lg bg-slate-50 p-1 dark:bg-slate-800" aria-label="Filter orders by payment method">
+            {(["all", "cash", "e_wallet", "card"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm dark:bg-slate-700 dark:text-blue-300" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : paymentMethodLabel(method)}</button>)}
           </div>
         </div>
-        <div className="divide-y divide-slate-100">{visibleOrders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div className="min-w-0"><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p><p className="mt-1 text-xs font-medium text-slate-600">{order.employeeName}</p><p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">{paymentMethodLabel(order.paymentMethod)}{order.paymentReferenceLast4 ? ` · Ref •••• ${order.paymentReferenceLast4}` : ""}{order.isWholesale && <span className="ml-2 rounded-full bg-emerald-50 px-2 py-0.5 normal-case tracking-normal text-emerald-700">Wholesale</span>}</p>{order.paymentMethod === "cash" && order.cashReceived !== null && <p className="mt-1 text-[10px] text-slate-400">Received {money(order.cashReceived)} · Change {money(order.changeDue ?? 0)}</p>}</div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
-        {visibleOrders.length === 0 && <div className="py-16 text-center text-sm text-slate-400">{orders.length ? `No ${paymentFilter === "all" ? "" : `${paymentMethodLabel(paymentFilter)} `}orders in the recent transactions.` : "No orders yet. Completed sales will show up here."}</div>}
+        {visibleOrders.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-left text-xs">
+              <thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:bg-slate-800/60">
+                <tr><th className="px-5 py-3">Status</th><th className="px-4 py-3">Date &amp; Time</th><th className="px-4 py-3">Cashier</th><th className="px-4 py-3">Payment Method</th><th className="px-4 py-3 text-right">Total</th><th className="px-5 py-3 text-right">Actions</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {visibleOrders.map((order) => {
+                  const { date, time } = orderDateTime(order.createdAt);
+                  return (
+                    <tr key={order.fullId} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
+                      <td className="px-5 py-3.5"><span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"><Check size={11} /> Completed</span><p className="mt-1.5 font-mono text-[10px] text-slate-400">{order.id}</p></td>
+                      <td className="px-4 py-3.5"><p className="font-medium text-slate-700 dark:text-slate-200">{date}</p><p className="mt-0.5 text-[11px] text-slate-400">{time}</p></td>
+                      <td className="px-4 py-3.5 font-medium text-slate-700 dark:text-slate-200">{order.employeeName}</td>
+                      <td className="px-4 py-3.5"><p className="font-medium text-slate-700 dark:text-slate-200">{paymentMethodLabel(order.paymentMethod)}{order.isWholesale && <span className="ml-2 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Wholesale</span>}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.paymentReferenceLast4 ? `Ref •••• ${order.paymentReferenceLast4}` : order.cashReceived !== null ? `Change ${money(order.changeDue ?? 0)}` : ""}</p></td>
+                      <td className="px-4 py-3.5 text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"}</p></td>
+                      <td className="px-5 py-3.5 text-right">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger aria-label={`Actions for order ${order.id}`} title="Actions" className="inline-grid h-8 w-8 place-items-center rounded-lg text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-300 data-[state=open]:bg-slate-100 data-[state=open]:text-slate-700 dark:hover:bg-slate-800 dark:data-[state=open]:bg-slate-800">
+                            <EllipsisVertical size={16} />
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-48 rounded-xl border-slate-100 bg-white p-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900">
+                            <DropdownMenuLabel className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Actions</DropdownMenuLabel>
+                            <DropdownMenuItem onSelect={() => setDetailsOrder(order)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><ReceiptText /> View details</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => void copyOrderId(order)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><ClipboardList /> Copy order number</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="py-16 text-center text-sm text-slate-400">{orders.length ? `No ${paymentFilter === "all" ? "" : `${paymentMethodLabel(paymentFilter)} `}orders in the recent transactions.` : "No orders yet. Completed sales will show up here."}</div>
+        )}
       </div>
+      {copiedId && <p role="status" className="mt-3 text-xs text-emerald-700">Order number copied.</p>}
+      {detailsOrder && <OrderDetailsDialog order={detailsOrder} onClose={() => setDetailsOrder(null)} />}
     </section>
+  );
+}
+
+function OrderDetailsDialog({ order, onClose }: { order: Order; onClose: () => void }) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); onClose(); }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+  const { date, time } = orderDateTime(order.createdAt);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="order-details-title" className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
+        <div className="mb-5 flex items-start justify-between">
+          <div><p className="text-xs font-semibold text-blue-600">ORDER DETAILS</p><h2 id="order-details-title" className="mt-1 font-mono text-xl font-semibold">{order.id}</h2><p className="mt-1 text-sm text-slate-500">{date} · {time} · {order.employeeName}</p></div>
+          <button type="button" aria-label="Close order details (Esc)" onClick={onClose} className="flex items-center gap-1.5 rounded-lg p-2 text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800"><Kbd>Esc</Kbd><X size={18} /></button>
+        </div>
+        <ul className="divide-y divide-slate-100 rounded-xl border border-slate-100 dark:divide-slate-800 dark:border-slate-800">
+          {order.lines.map((line, index) => (
+            <li key={`${line.name}-${index}`} className="flex items-start justify-between gap-3 px-4 py-3 text-xs">
+              <div className="min-w-0"><p className="flex items-center gap-1.5 font-semibold"><span className="truncate">{line.name}</span>{line.custom && <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-800">Custom</span>}</p><p className="mt-0.5 text-[11px] text-slate-400">{line.quantity} × {money(line.unitPrice)}</p></div>
+              <span className="shrink-0 font-semibold">{money(line.quantity * line.unitPrice)}</span>
+            </li>
+          ))}
+        </ul>
+        <dl className="mt-4 space-y-2 text-xs">
+          <div className="flex justify-between text-slate-500"><dt>Payment</dt><dd className="font-medium text-slate-700 dark:text-slate-200">{paymentMethodLabel(order.paymentMethod)}{order.paymentReferenceLast4 ? ` · Ref •••• ${order.paymentReferenceLast4}` : ""}{order.isWholesale ? " · Wholesale" : ""}</dd></div>
+          {order.cashReceived !== null && <div className="flex justify-between text-slate-500"><dt>Cash received</dt><dd className="font-medium text-slate-700 dark:text-slate-200">{money(order.cashReceived)}</dd></div>}
+          {order.cashReceived !== null && <div className="flex justify-between text-slate-500"><dt>Change</dt><dd className="font-medium text-slate-700 dark:text-slate-200">{money(order.changeDue ?? 0)}</dd></div>}
+          <div className="flex items-center justify-between border-t border-dashed border-slate-200 pt-3 dark:border-slate-700"><dt className="text-sm font-semibold">Total</dt><dd className="text-lg font-bold">{money(order.total)}</dd></div>
+        </dl>
+        <p className="mt-4 flex items-center gap-1.5 text-[11px] text-emerald-700"><Check size={13} /> Completed · {order.items} item{order.items === 1 ? "" : "s"}</p>
+      </div>
+    </div>
   );
 }
