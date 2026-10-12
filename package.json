@@ -1,7 +1,7 @@
 {
   "name": "clover-pos",
   "productName": "Clover POS",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Point of sale for Clover & Co.",
   "author": "Clover & Co.",
   "private": true,
@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "desktop": "next build && electron .",
     "desktop:dev": "electron . --dev",
-    "dist:win": "next build && electron-builder --win nsis"
+    "dist:win": "next build && electron-builder --win nsis",
+    "release:win": "next build && electron-builder --win nsis --publish always"
   },
   "build": {
     "appId": "co.clover.pos",
@@ -39,7 +40,15 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Clover POS"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "yourstrulyazrael",
+        "repo": "POS-System",
+        "releaseType": "release"
+      }
+    ]
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
@@ -67,5 +76,8 @@
     "tailwindcss": "^3.4.1",
     "tailwindcss-animate": "^1.0.7",
     "typescript": "^5"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
   }
 }

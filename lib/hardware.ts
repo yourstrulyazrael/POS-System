@@ -18,10 +18,23 @@ export type HardwareSettings = {
   deviceLabel: string; // shown on cash counts, e.g. "Till 1"
 };
 
+export type UpdateStatus = {
+  state: "idle" | "unsupported" | "checking" | "current" | "downloading" | "ready" | "error";
+  version: string | null; // the new version, once one is found
+  percent: number | null;
+  message: string | null;
+  currentVersion?: string;
+};
+
 type DesktopBridge = {
   listPrinters: () => Promise<{ name: string; displayName: string; isDefault: boolean }[]>;
   printHtml: (html: string, options: { printerName: string; paperWidth: number }) => Promise<void>;
   openDrawer: (options: { mode: "network" | "shared"; host: string; port: number; share: string }) => Promise<void>;
+  // Live updates (installed desktop app only).
+  getUpdateStatus?: () => Promise<UpdateStatus>;
+  checkForUpdates?: () => Promise<UpdateStatus>;
+  installUpdate?: () => Promise<void>;
+  onUpdateStatus?: (callback: (status: UpdateStatus) => void) => () => void;
 };
 
 declare global {
@@ -59,6 +72,31 @@ export function saveHardwareSettings(settings: HardwareSettings) {
   } catch {
     // Not critical: the settings apply for this visit.
   }
+}
+
+// ---------- live updates (desktop app) ----------
+
+export const supportsLiveUpdates = () => typeof window !== "undefined" && !!window.posDesktop?.onUpdateStatus;
+
+export function watchUpdateStatus(onChange: (status: UpdateStatus) => void) {
+  const bridge = window.posDesktop;
+  if (!bridge?.onUpdateStatus || !bridge.getUpdateStatus) return () => undefined;
+  let currentVersion: string | undefined;
+  void bridge.getUpdateStatus().then((status) => {
+    currentVersion = status.currentVersion;
+    onChange(status);
+  }).catch(() => undefined);
+  return bridge.onUpdateStatus((status) => onChange({ ...status, currentVersion: status.currentVersion ?? currentVersion }));
+}
+
+export async function checkForUpdates() {
+  if (!window.posDesktop?.checkForUpdates) throw new Error("Updates are available in the desktop app.");
+  return window.posDesktop.checkForUpdates();
+}
+
+export async function installUpdate() {
+  if (!window.posDesktop?.installUpdate) throw new Error("Updates are available in the desktop app.");
+  await window.posDesktop.installUpdate();
 }
 
 export async function listPrinters() {

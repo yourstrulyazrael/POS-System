@@ -151,6 +151,72 @@ function registerHardwareHandlers() {
   });
 }
 
+// ---------- live updates ----------
+//
+// Installed copies check GitHub Releases (package.json → build.publish) for a
+// newer version, download it in the background, and tell the page. It
+// installs when the cashier clicks "Restart to update", or automatically the
+// next time the app is closed — never in the middle of a sale.
+
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+let updateStatus = { state: "idle", version: null, percent: null, message: null };
+
+function setUpdateStatus(patch) {
+  updateStatus = { ...updateStatus, ...patch };
+  mainWindow?.webContents.send("pos:update-status", updateStatus);
+}
+
+function setupLiveUpdates() {
+  if (!app.isPackaged || isDev) {
+    updateStatus = { ...updateStatus, state: "unsupported", message: "Updates are only checked in the installed app." };
+    return;
+  }
+  const { autoUpdater } = require("electron-updater");
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger = null;
+
+  autoUpdater.on("checking-for-update", () => setUpdateStatus({ state: "checking", message: null }));
+  autoUpdater.on("update-not-available", () => setUpdateStatus({ state: "current", percent: null, message: null }));
+  autoUpdater.on("update-available", (info) => setUpdateStatus({ state: "downloading", version: info.version, percent: 0, message: null }));
+  autoUpdater.on("download-progress", (progress) => setUpdateStatus({ state: "downloading", percent: Math.round(progress.percent) }));
+  autoUpdater.on("update-downloaded", (info) => setUpdateStatus({ state: "ready", version: info.version, percent: 100, message: null }));
+  autoUpdater.on("error", (error) => setUpdateStatus({ state: "error", message: error?.message ? String(error.message).split("\n")[0].slice(0, 200) : "Update check failed." }));
+
+  const check = () => autoUpdater.checkForUpdates().catch(() => undefined); // errors arrive via the "error" event
+  setTimeout(check, 15_000);
+  setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+
+  ipcMain.handle("pos:check-for-updates", async (event) => {
+    if (!fromAppPage(event)) throw new Error("Not allowed.");
+    await check();
+    return updateStatus;
+  });
+  ipcMain.handle("pos:install-update", (event) => {
+    if (!fromAppPage(event)) throw new Error("Not allowed.");
+    if (updateStatus.state !== "ready") throw new Error("No update is ready to install.");
+    // Silent install, then reopen the app on the new version.
+    setImmediate(() => autoUpdater.quitAndInstall(true, true));
+  });
+}
+
+function registerUpdateInfoHandlers() {
+  ipcMain.handle("pos:get-update-status", (event) => {
+    if (!fromAppPage(event)) throw new Error("Not allowed.");
+    return { ...updateStatus, currentVersion: app.getVersion() };
+  });
+  // Present in dev too, so the page can show a clear message.
+  if (!app.isPackaged || isDev) {
+    ipcMain.handle("pos:check-for-updates", (event) => {
+      if (!fromAppPage(event)) throw new Error("Not allowed.");
+      return updateStatus;
+    });
+    ipcMain.handle("pos:install-update", () => {
+      throw new Error("Updates are only installed in the installed app.");
+    });
+  }
+}
+
 // ---------- window state ----------
 
 const stateFile = () => path.join(app.getPath("userData"), "window-state.json");
@@ -254,6 +320,8 @@ app.whenReady().then(() => {
 
   protocol.handle(SCHEME, serveAppRequest);
   registerHardwareHandlers();
+  registerUpdateInfoHandlers();
+  setupLiveUpdates();
 
   // The POS needs no camera, microphone, location or notifications. Only
   // clipboard writes ("Copy order number") are allowed.

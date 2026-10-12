@@ -55,6 +55,23 @@ npm run dist:win
 
 Output: `dist-desktop/Clover POS Setup <version>.exe` (≈115 MB, mostly the Electron runtime). Bump `version` in `package.json` for each release. The installer is unsigned, so Windows SmartScreen will warn on first run; configure a code-signing certificate in electron-builder to remove the warning.
 
+## Live updates (releasing a new version)
+
+Installed copies update themselves from this repository's **GitHub Releases** (`electron-updater`; see `build.publish` in `package.json`). They check 15 s after launch and every 4 hours, download in the background, then show a green "Restart to update" bar; if nobody restarts, the update installs when the app is closed. Account → App updates shows the installed version and has **Check for updates**. Queued offline sales, the open cash drawer session and settings survive an update.
+
+To publish an update:
+
+1. Bump `version` in `package.json` (e.g. `1.1.0` → `1.2.0`). Installed copies only update to a higher version.
+2. Create a GitHub token with **Contents: read and write** for this repository (fine-grained token), then publish:
+   ```bash
+   # PowerShell: $env:GH_TOKEN="<token>"   bash: export GH_TOKEN=<token>
+   npm run release:win
+   ```
+   This builds the installer and uploads it, with `latest.yml` and the `.blockmap`, to a GitHub release for that version.
+3. Installed copies pick it up on their next check.
+
+Notes: the repository must stay public (or updates need a token on every till). Version 1.1.0 is the first build that includes the updater, so tills on 1.0.0 must install 1.1.0 manually once. The installer is unsigned, so Windows may show a SmartScreen prompt on the first manual install; updates install silently.
+
 ## 5. First run
 
 1. Open the app → **Create the first admin**, and enter the `POS_SETUP_SECRET` value. Setup closes once an admin exists.

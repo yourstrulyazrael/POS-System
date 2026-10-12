@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "re
 import { Ban, Banknote, Printer, RotateCcw, Store, Wallet, WifiOff, X } from "lucide-react";
 import type { CashSession } from "@/lib/cash-session";
 import { expectedCash } from "@/lib/cash-session";
-import { isDesktopApp, listPrinters, type DrawerMode, type HardwareSettings } from "@/lib/hardware";
+import { isDesktopApp, listPrinters, type DrawerMode, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
 import { pesoDenominations, type StoreDetails } from "@/lib/receipts";
 
 type PaymentMethod = "cash" | "e_wallet" | "card";
@@ -380,10 +380,55 @@ export function HardwareSettingsCard({ settings, onChange, onTestPrint, onTestDr
       </div>
       {settings.drawerMode === "driver" && <p className="mt-3 text-[11px] leading-4 text-slate-500">Turn on “open cash drawer” in the printer driver’s settings (Windows → Printers → your printer → Printing preferences). The drawer then opens whenever a receipt prints.</p>}
       {settings.drawerMode === "shared" && <p className="mt-3 text-[11px] leading-4 text-slate-500">Share the printer in Windows (Printer properties → Sharing) and enter its share name. Works with ESC/POS printers whose driver accepts raw data.</p>}
-      <label className="mt-4 flex items-center gap-2 text-sm"><input type="checkbox" checked={settings.autoPrint} onChange={(event) => update({ autoPrint: event.currentTarget.checked })} className="h-4 w-4 accent-blue-600" /> Print a receipt automatically after every sale</label>
+      <label className="mt-4 flex items-center gap-2 text-sm"><input type="checkbox" checked={settings.autoPrint} onChange={(event) => update({ autoPrint: event.currentTarget.checked })} className="h-4 w-4 accent-blue-600" /> Print receipts by default (cashiers can switch it per sale at checkout, F7)</label>
       <div className="mt-4 flex flex-wrap gap-2">
         <button type="button" onClick={onTestPrint} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300"><Printer size={14} /> Print a test receipt</button>
         <button type="button" onClick={onTestDrawer} disabled={settings.drawerMode === "none"} className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"><Banknote size={14} /> Open the drawer</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- live updates (desktop app) ----------
+
+// Shown once a new version has downloaded. Restarting is the cashier's
+// choice; otherwise it installs the next time the app is closed.
+export function UpdateReadyBar({ version, busy, onRestart }: { version: string | null; busy: boolean; onRestart: () => void }) {
+  return (
+    <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white">
+      <span>Clover POS {version ? `v${version}` : "update"} is ready. It installs when you close the app, or restart now (about 10 seconds).</span>
+      <button type="button" onClick={onRestart} disabled={busy} className="h-6 rounded-md bg-white px-3 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60">{busy ? "Restarting…" : "Restart to update"}</button>
+    </div>
+  );
+}
+
+export function UpdatesCard({ status, onCheck, onInstall }: {
+  status: UpdateStatus | null;
+  onCheck: () => Promise<void>;
+  onInstall: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const describe = () => {
+    if (!status) return "Checking the app version…";
+    switch (status.state) {
+      case "unsupported": return status.message ?? "Updates are only checked in the installed app.";
+      case "checking": return "Checking for updates…";
+      case "downloading": return `Downloading v${status.version ?? "?"}${status.percent !== null ? ` · ${status.percent}%` : ""}…`;
+      case "ready": return `v${status.version} is downloaded and ready to install.`;
+      case "current": return "You’re on the latest version.";
+      case "error": return `Couldn’t check for updates: ${status.message ?? "unknown error"}`;
+      default: return "Updates are checked automatically when the app starts and every few hours.";
+    }
+  };
+  return (
+    <div className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-start gap-3"><RotateCcw size={18} className="mt-0.5 text-blue-600" /><div><h2 className="text-sm font-semibold">App updates</h2><p className="mt-1 text-xs leading-5 text-slate-500">Installed version: {status?.currentVersion ? `v${status.currentVersion}` : "—"} · {describe()}</p></div></div>
+        {status?.state === "ready" ? (
+          <button type="button" onClick={onInstall} className="h-9 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white hover:bg-emerald-700">Restart to update</button>
+        ) : (
+          <button type="button" disabled={busy || status?.state === "unsupported" || status?.state === "checking" || status?.state === "downloading"} onClick={async () => { setBusy(true); await onCheck(); setBusy(false); }} className="h-9 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300">{busy ? "Checking…" : "Check for updates"}</button>
+        )}
       </div>
     </div>
   );

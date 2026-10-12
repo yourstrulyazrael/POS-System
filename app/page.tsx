@@ -55,7 +55,7 @@ import {
 import { AUTH_STORAGE_KEY, callPosAdmin, createClient } from "@/lib/supabase/client";
 import { deletePendingOrder, isNetworkError, listPendingOrders, readCache, savePendingOrder, storedSessionUserId, writeCache, type PendingOrder } from "@/lib/offline-store";
 import { buildCashCountReport, buildRefundReceipt, buildSaleReceipt, defaultStoreDetails, type StoreDetails } from "@/lib/receipts";
-import { defaultHardwareSettings, loadHardwareSettings, openCashDrawer, printDocument, saveHardwareSettings, type HardwareSettings } from "@/lib/hardware";
+import { checkForUpdates, defaultHardwareSettings, installUpdate, loadHardwareSettings, openCashDrawer, printDocument, saveHardwareSettings, supportsLiveUpdates, watchUpdateStatus, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
 import { rememberOfflineCredential, verifyOfflineCredential } from "@/lib/offline-auth";
 import { closeSession, expectedCash, openSession, readCurrentSession, readSessionOutbox, recordInSession, removeFromSessionOutbox, type CashSession } from "@/lib/cash-session";
 import { ThemeSwitcher } from "@/components/theme-switcher";
@@ -64,7 +64,7 @@ import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
-import { CashCountDialog, DrawerStatusButton, HardwareSettingsCard, OpenDrawerDialog, ReconnectBanner, RefundDialog, RefundIcon, StoreDetailsCard, VoidDialog, VoidIcon } from "@/components/pos-dialogs";
+import { CashCountDialog, DrawerStatusButton, HardwareSettingsCard, OpenDrawerDialog, ReconnectBanner, RefundDialog, RefundIcon, StoreDetailsCard, UpdateReadyBar, UpdatesCard, VoidDialog, VoidIcon } from "@/components/pos-dialogs";
 import { buildProductsXlsx, buildTemplateXlsx, importColumns, readProductFile, type RawProductRecord } from "@/lib/product-import";
 import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
@@ -537,6 +537,10 @@ export default function Home() {
   // session until the cashier reconnects with their password.
   const [offlineSession, setOfflineSession] = useState(false);
   const [sessionOutboxCount, setSessionOutboxCount] = useState(0);
+  // Print a receipt for the sale being paid for (starts from this till's default).
+  const [printThisSale, setPrintThisSale] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [showAddEmployee, setShowAddEmployee] = useState(false);
@@ -708,6 +712,14 @@ export default function Home() {
     const timer = window.setTimeout(() => setNotice((current) => (current === notice ? "" : current)), 5000);
     return () => window.clearTimeout(timer);
   }, [notice, noticeIsSuccess, showCheckoutDialog]);
+
+  // Each checkout starts from this till's "print receipts by default" setting.
+  useEffect(() => {
+    if (showCheckoutDialog) setPrintThisSale(hardware.autoPrint);
+  }, [hardware.autoPrint, showCheckoutDialog]);
+
+  // Desktop app: live update status from the main process.
+  useEffect(() => watchUpdateStatus(setUpdateStatus), []);
 
   // This till's printer/drawer settings and its open cash drawer session.
   useEffect(() => {
@@ -1114,6 +1126,7 @@ export default function Home() {
     F2: () => choosePaymentMethod("e_wallet"),
     F3: () => choosePaymentMethod("card"),
     F4: () => setWholesaleMode((current) => !current),
+    F7: () => setPrintThisSale((current) => !current),
   }, showCheckoutDialog && !showHelpCenter && !isLoading);
 
   // Auto-add: once the entry ("24/<barcode>" or a bare barcode) exactly matches
@@ -1207,7 +1220,7 @@ export default function Home() {
       return;
     }
     if (!navigator.onLine || offlineSession) {
-      await saveSaleOffline(sale);
+      await saveSaleOffline(sale, printThisSale);
       setIsLoading(false);
       return;
     }
@@ -1226,7 +1239,7 @@ export default function Home() {
         p_cash_session_id: sale.cashSessionId,
       }).single();
       if (error && isNetworkError(error)) {
-        await saveSaleOffline(sale);
+        await saveSaleOffline(sale, printThisSale);
         return;
       }
       if (error) throw error;
@@ -1234,7 +1247,7 @@ export default function Home() {
         throw new Error("Checkout completed, but the order confirmation was invalid.");
       }
       const newOrderId = sale.clientOrderId.slice(0, 8);
-      void afterSale(sale, false);
+      void afterSale(sale, false, printThisSale);
       const wasWholesale = wholesaleMode;
       clearOrder();
       setShowCheckoutDialog(false);
@@ -1293,6 +1306,43 @@ export default function Home() {
     }
   }
 
+  // ---------- live updates (desktop app) ----------
+
+  async function checkForAppUpdates() {
+    try {
+      setUpdateStatus((current) => ({ ...(current ?? { version: null, percent: null, message: null }), state: "checking" }));
+      const status = await checkForUpdates();
+      setUpdateStatus((current) => ({ ...status, currentVersion: current?.currentVersion ?? status.currentVersion }));
+    } catch (error) {
+      setNotice(`Couldn’t check for updates: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }
+
+  // The app restarts into the new version. Queued offline sales, drawer
+  // sessions and settings are stored on disk and survive the restart; only an
+  // order still in the cart would be lost, so ask first.
+  function restartToUpdate() {
+    const run = async () => {
+      setInstallingUpdate(true);
+      try {
+        await installUpdate();
+      } catch (error) {
+        setInstallingUpdate(false);
+        setNotice(`The update couldn’t be installed: ${error instanceof Error ? error.message : "unknown error"}`);
+      }
+    };
+    if (itemCount > 0 || showCheckoutDialog) {
+      setConfirmAction({
+        title: "Restart with an order in progress?",
+        message: "The items in the current order will be cleared. Completed sales, sales waiting to sync, and the open cash drawer session are kept.",
+        confirmLabel: "Restart now",
+        onConfirm: run,
+      });
+      return;
+    }
+    void run();
+  }
+
   async function printTestReceipt() {
     const sample: Order = {
       id: "#TEST0001",
@@ -1335,13 +1385,13 @@ export default function Home() {
 
   // After a sale (online or saved offline): count it in the open drawer
   // session, open the drawer for cash, and print the receipt if enabled.
-  async function afterSale(sale: PendingOrder, savedOffline: boolean) {
+  async function afterSale(sale: PendingOrder, savedOffline: boolean, print: boolean) {
     if (sale.cashSessionId) {
       const updated = await recordInSession(sale.cashSessionId, sale.paymentMethod, sale.total, true).catch(() => null);
       if (updated) setCashSession(updated);
     }
     if (sale.paymentMethod === "cash") void openDrawer();
-    if (hardware.autoPrint) {
+    if (print) {
       const order = pendingToOrder(sale);
       await printReceipt(savedOffline ? order : { ...order, syncStatus: undefined }, false);
     }
@@ -1478,7 +1528,7 @@ export default function Home() {
 
   // Records a sale on this computer to sync later. The sale is on disk before
   // anything else changes; if saving fails, the cart is left as it was.
-  async function saveSaleOffline(sale: PendingOrder) {
+  async function saveSaleOffline(sale: PendingOrder, print: boolean) {
     try {
       await savePendingOrder(sale);
     } catch (error) {
@@ -1499,7 +1549,7 @@ export default function Home() {
     setCashReceived("");
     setPaymentReferenceLast4("");
     setNotice(`Sale #${sale.clientOrderId.slice(0, 8)} saved offline on this computer. It will sync automatically when the connection is back.`);
-    void afterSale(sale, true);
+    void afterSale(sale, true, print);
   }
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
@@ -2250,6 +2300,7 @@ export default function Home() {
       <div className="flex min-h-screen">
         <div className="min-w-0 flex-1">
           <header className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
+            {updateStatus?.state === "ready" && <UpdateReadyBar version={updateStatus.version} busy={installingUpdate} onRestart={restartToUpdate} />}
             {offlineSession && isOnline && <ReconnectBanner email={accountEmail} onReconnect={reconnectOnline} />}
             {!connected && <OfflineBanner signedIn waiting={waitingToSync} />}
             <div className="flex h-[72px] items-center gap-3 px-4 sm:px-7 xl:px-9">
@@ -2372,6 +2423,7 @@ export default function Home() {
               <>
               <section className="mx-auto mb-5 max-w-3xl space-y-5">
                 <HardwareSettingsCard settings={hardware} onChange={(settings) => { setHardware(settings); saveHardwareSettings(settings); }} onTestPrint={() => void printTestReceipt()} onTestDrawer={() => void openDrawer(true)} />
+                {supportsLiveUpdates() && <UpdatesCard status={updateStatus} onCheck={checkForAppUpdates} onInstall={restartToUpdate} />}
                 <StoreDetailsCard details={storeDetails} canEdit={isAdmin && connected && !offlineSession} onSave={saveStoreDetails} />
               </section>
               <AccountView
@@ -2557,7 +2609,7 @@ export default function Home() {
                 ))}
               </div>
             </fieldset>
-            <div className={`mt-4 rounded-xl border p-3 ${wholesaleMode ? "border-emerald-200 bg-emerald-50/70" : "border-slate-200"}`}>
+            <div className={`mt-4 rounded-xl border p-3 ${wholesaleMode ? "border-emerald-200 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/50" : "border-slate-200 dark:border-slate-700"}`}>
               <button type="button" role="switch" aria-checked={wholesaleMode} aria-keyshortcuts="F4" onClick={() => setWholesaleMode((current) => !current)} className="flex w-full items-center gap-3 text-left">
                 <span className={`relative h-5 w-9 shrink-0 rounded-full transition ${wholesaleMode ? "bg-emerald-600" : "bg-slate-300"}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${wholesaleMode ? "left-[18px]" : "left-0.5"}`} /></span>
                 <span className="flex-1"><span className="block text-sm font-semibold text-slate-700">Wholesale pricing</span><span className="block text-[11px] text-slate-500">{wholesaleMode ? `Saving ${money(wholesaleSavings)} off retail (${money(retailTotal)})` : "Charge this customer wholesale prices"}</span></span>
@@ -2567,6 +2619,11 @@ export default function Home() {
                 <p className="mt-2 border-t border-emerald-200 pt-2 text-[11px] leading-4 text-amber-700">No wholesale price set — charged at retail: {itemsWithoutWholesalePrice.map((product) => product.name).join(", ")}</p>
               )}
             </div>
+            <button type="button" role="switch" aria-checked={printThisSale} aria-keyshortcuts="F7" onClick={() => setPrintThisSale((current) => !current)} className={`mt-2 flex w-full items-center gap-3 rounded-xl border p-3 text-left ${printThisSale ? "border-blue-200 bg-blue-50/70 dark:border-blue-800 dark:bg-blue-950/50" : "border-slate-200 dark:border-slate-700"}`}>
+              <span className={`relative h-5 w-9 shrink-0 rounded-full transition ${printThisSale ? "bg-blue-600" : "bg-slate-300"}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${printThisSale ? "left-[18px]" : "left-0.5"}`} /></span>
+              <span className="flex-1"><span className="flex items-center gap-1.5 text-sm font-semibold text-slate-700"><Printer size={14} /> Print receipt</span><span className="block text-[11px] text-slate-500">{printThisSale ? "A receipt prints when the payment is confirmed" : "No receipt for this sale (reprint any time from Orders)"}</span></span>
+              <Kbd className="text-slate-500">F7</Kbd>
+            </button>
             {paymentMethod === "cash" ? (
               <div className="mt-4 space-y-3 rounded-xl bg-slate-50 p-4">
                 <label className="block text-sm font-medium text-slate-700">Cash received (₱)
@@ -2938,6 +2995,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
               ["F8", "Turn product images on or off"],
               ["F1 / F2 / F3", "In checkout: Cash / E-Wallet / Card"],
               ["F4 in checkout", "Turn wholesale pricing on or off"],
+              ["F7 in checkout", "Print a receipt for this sale, or not"],
               ["F-keys in pop-ups", "Choose a pop-up’s options (shown on each option)"],
               ["F9", "Clear the current order"],
               ["Esc", "Close a dialog or clear the search"],
