@@ -42,10 +42,13 @@ import Link from "next/link";
 import Image from "next/image";
 
 type Role = "employee" | "admin";
+type PaymentMethod = "cash" | "e_wallet" | "card";
 type Product = {
   id: string;
   name: string;
   category: string;
+  costPrice: number;
+  wholesalePrice: number;
   price: number;
   stock: number;
   imageIcon: string;
@@ -53,16 +56,18 @@ type Product = {
   emoji: string;
   color: string;
 };
-type Order = { id: string; items: number; total: number; time: string; paymentMethod: "cash" | "gcash"; gcashReferenceLast4: string | null; employeeName: string };
-type SalesChartPoint = { label: string; cash: number; gcash: number };
-type ProductRow = { id: string; name: string; category: string; price: number; stock: number; image_icon: string | null; image_url: string | null };
+type Order = { id: string; items: number; total: number; time: string; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string };
+type SalesChartPoint = { label: string; cash: number; eWallet: number; card: number };
+type ProductRow = { id: string; name: string; category: string; cost_price: number; wholesale_price: number; price: number; stock: number; image_icon: string | null; image_url: string | null };
 type OrderRow = {
   id: string;
   total: number;
   created_at: string;
   order_items: { quantity: number }[];
-  payment_method: "cash" | "gcash";
-  gcash_reference_last4: string | null;
+  payment_method: PaymentMethod;
+  payment_reference_last4: string | null;
+  cash_received: number | string | null;
+  change_due: number | string | null;
   employee_name: string;
   employee_id?: string | null;
 };
@@ -72,6 +77,8 @@ type SalesPeriod = "today" | "7days" | "30days";
 
 const money = (amount: number) =>
   new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(amount);
+const paymentMethodLabel = (method: PaymentMethod) =>
+  method === "e_wallet" ? "E-Wallet" : method === "card" ? "Card" : "Cash";
 
 const categoryColors = ["bg-sky-50", "bg-amber-50", "bg-violet-50", "bg-rose-50"];
 const sariSariCategories = [
@@ -144,8 +151,8 @@ function productAppearance(name: string, category: string, index: number, imageI
 async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod = "today") {
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
-    supabase.from("products").select("id, name, category, price, stock, image_icon, image_url").eq("active", true).order("name").returns<ProductRow[]>(),
-    supabase.from("orders").select("id, total, created_at, payment_method, gcash_reference_last4, employee_name, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
+    supabase.from("products").select("id, name, category, cost_price, wholesale_price, price, stock, image_icon, image_url").eq("active", true).order("name").returns<ProductRow[]>(),
+    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
   if (ordersResult.error) throw new Error(`Unable to load orders: ${ordersResult.error.message}`);
@@ -176,15 +183,18 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       units_in_stock: Number(data.units_in_stock),
       active_employees: Number(data.active_employees),
     };
-    salesChart = (chartRows ?? []).map((row: { bucket_label: string; cash_total: number | string; gcash_total: number | string }) => ({
+    salesChart = (chartRows ?? []).map((row: { bucket_label: string; cash_total: number | string; e_wallet_total: number | string; card_total: number | string }) => ({
       label: String(row.bucket_label),
       cash: Number(row.cash_total),
-      gcash: Number(row.gcash_total),
+      eWallet: Number(row.e_wallet_total),
+      card: Number(row.card_total),
     }));
   }
   return {
     products: productsResult.data.map((product, index) => ({
       ...product,
+      costPrice: Number(product.cost_price),
+      wholesalePrice: Number(product.wholesale_price),
       price: Number(product.price),
       imageIcon: product.image_icon ?? "auto",
       imageUrl: product.image_url,
@@ -196,7 +206,9 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       total: Number(order.total),
       time: new Date(order.created_at).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
       paymentMethod: order.payment_method,
-      gcashReferenceLast4: order.gcash_reference_last4,
+      paymentReferenceLast4: order.payment_reference_last4,
+      cashReceived: order.cash_received === null ? null : Number(order.cash_received),
+      changeDue: order.change_due === null ? null : Number(order.change_due),
       employeeName: order.employee_name || "Former employee",
     })),
     stats,
@@ -246,9 +258,9 @@ function parseProductCsv(content: string) {
   if (rows.length < 2) throw new Error("The CSV needs a header and at least one product row.");
 
   const headers = rows[0].map((header) => header.replace(/^\uFEFF/, "").trim().toLowerCase());
-  const requiredHeaders = ["name", "category", "price", "stock"];
-  if (requiredHeaders.some((header) => !headers.includes(header))) {
-    throw new Error("CSV headers must include name, category, price, and stock.");
+  const requiredHeaders = ["name", "category", "stock"];
+  if (requiredHeaders.some((header) => !headers.includes(header)) || (!headers.includes("price") && !headers.includes("retail_price"))) {
+    throw new Error("CSV headers must include name, category, retail_price (or price), and stock.");
   }
   const records = rows.slice(1).map((values) =>
     Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])),
@@ -264,7 +276,9 @@ function validateImportedProducts(value: unknown[]) {
     const item = record as Record<string, unknown>;
     const name = typeof item.name === "string" ? item.name.trim() : "";
     const category = typeof item.category === "string" ? item.category.trim() : "";
-    const price = Number(item.price);
+    const costPrice = item.cost_price === undefined || item.cost_price === "" ? 0 : Number(item.cost_price);
+    const wholesalePrice = item.wholesale_price === undefined || item.wholesale_price === "" ? 0 : Number(item.wholesale_price);
+    const price = Number(item.retail_price ?? item.price);
     const stock = Number(item.stock);
     const imageIcon = typeof item.image_icon === "string" ? item.image_icon.trim() : "auto";
     if (
@@ -272,15 +286,19 @@ function validateImportedProducts(value: unknown[]) {
       name.length > 120 ||
       !category ||
       category.length > 80 ||
+      !Number.isFinite(costPrice) ||
+      costPrice < 0 ||
+      !Number.isFinite(wholesalePrice) ||
+      wholesalePrice < 0 ||
       !Number.isFinite(price) ||
       price <= 0 ||
       !Number.isInteger(stock) ||
       stock < 0 ||
       !productIcons.some((icon) => icon.id === imageIcon)
     ) {
-      throw new Error(`Product row ${index + 1} needs a name, category, positive price, and non-negative whole-number stock.`);
+      throw new Error(`Product row ${index + 1} needs a name, category, non-negative cost and wholesale prices, a positive retail price, and non-negative whole-number stock.`);
     }
-    return { name, category, price, stock, image_icon: imageIcon };
+    return { name, category, cost_price: costPrice, wholesale_price: wholesalePrice, price, stock, image_icon: imageIcon };
   });
 }
 
@@ -303,13 +321,16 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [activePage, setActivePage] = useState<"dashboard" | "pos" | "inventory" | "orders" | "employees" | "account">("pos");
   const [showAddProduct, setShowAddProduct] = useState(false);
+  const [editingProductPrices, setEditingProductPrices] = useState<Product | null>(null);
   const [selectedProductIcon, setSelectedProductIcon] = useState("auto");
   const [selectedProductImage, setSelectedProductImage] = useState<File | null>(null);
   const [editingProductImage, setEditingProductImage] = useState<Product | null>(null);
   const [removeExistingProductImage, setRemoveExistingProductImage] = useState(false);
   const [showHelpCenter, setShowHelpCenter] = useState(false);
-  const [paymentMethod, setPaymentMethod] = useState<"cash" | "gcash">("cash");
-  const [gcashReferenceLast4, setGcashReferenceLast4] = useState("");
+  const [showCheckoutDialog, setShowCheckoutDialog] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
+  const [cashReceived, setCashReceived] = useState("");
+  const [paymentReferenceLast4, setPaymentReferenceLast4] = useState("");
   const [accountEmail, setAccountEmail] = useState("");
   const [accountName, setAccountName] = useState("");
   const [salesResetConfirmation, setSalesResetConfirmation] = useState("");
@@ -453,8 +474,13 @@ export default function Home() {
 
   async function checkout() {
     if (!itemCount) return;
-    if (paymentMethod === "gcash" && !/^\d{4}$/.test(gcashReferenceLast4)) {
-      setNotice("Enter the last 4 digits of the GCash reference number.");
+    const receivedAmount = paymentMethod === "cash" ? Number(cashReceived) : null;
+    if (paymentMethod === "cash" && (receivedAmount === null || !Number.isFinite(receivedAmount) || receivedAmount < total)) {
+      setNotice("Cash received must be at least the order total.");
+      return;
+    }
+    if (paymentMethod !== "cash" && !/^\d{4}$/.test(paymentReferenceLast4)) {
+      setNotice(`Enter the last 4 digits of the ${paymentMethod === "e_wallet" ? "E-Wallet" : "card"} reference number.`);
       return;
     }
     setIsLoading(true);
@@ -463,7 +489,8 @@ export default function Home() {
       const { data, error } = await supabase.rpc("place_order", {
         p_items: cartItems.map((product) => ({ product_id: product.id, quantity: cart[product.id] })),
         p_payment_method: paymentMethod,
-        p_gcash_reference_last4: paymentMethod === "gcash" ? gcashReferenceLast4 : null,
+        p_payment_reference_last4: paymentMethod === "cash" ? null : paymentReferenceLast4,
+        p_cash_received: receivedAmount,
       }).single();
       if (error) throw error;
       if (!data || typeof data !== "object" || !("order_id" in data) || typeof data.order_id !== "string") {
@@ -471,7 +498,9 @@ export default function Home() {
       }
       const newOrderId = data.order_id.slice(0, 8);
       setCart({});
-      setGcashReferenceLast4("");
+      setShowCheckoutDialog(false);
+      setCashReceived("");
+      setPaymentReferenceLast4("");
       setNotice(`Order #${newOrderId} placed successfully.`);
       try {
         await refreshWorkspace();
@@ -528,6 +557,8 @@ export default function Home() {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const name = String(formData.get("name") ?? "").trim();
+    const costPrice = Number(formData.get("cost_price"));
+    const wholesalePrice = Number(formData.get("wholesale_price"));
     const price = Number(formData.get("price"));
     const stock = Number(formData.get("stock"));
     const selectedCategory = String(formData.get("category") ?? sariSariCategories[0]);
@@ -538,8 +569,8 @@ export default function Home() {
       setNotice("Choose a JPEG, PNG, or WebP image that is no larger than 5 MB.");
       return;
     }
-    if (!name || !Number.isFinite(price) || price <= 0 || !Number.isInteger(stock) || stock < 0) {
-      setNotice("Enter a product name, a price above ₱0, and a valid stock quantity.");
+    if (!name || !Number.isFinite(costPrice) || costPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(price) || price <= 0 || !Number.isInteger(stock) || stock < 0) {
+      setNotice("Enter a product name, valid cost and wholesale prices, a retail price above ₱0, and a valid stock quantity.");
       return;
     }
     let uploadedPath: string | null = null;
@@ -567,6 +598,8 @@ export default function Home() {
       const { error } = await supabase.from("products").insert({
         name,
         category: selectedCategory,
+        cost_price: costPrice,
+        wholesale_price: wholesalePrice,
         price,
         stock,
         image_icon: selectedProductIcon,
@@ -612,6 +645,41 @@ export default function Home() {
       }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Unable to remove product.");
+    }
+  }
+
+  async function saveProductPrices(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingProductPrices) return;
+    const formData = new FormData(event.currentTarget);
+    const costPrice = Number(formData.get("cost_price"));
+    const wholesalePrice = Number(formData.get("wholesale_price"));
+    const retailPrice = Number(formData.get("price"));
+    if (!Number.isFinite(costPrice) || costPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(retailPrice) || retailPrice <= 0) {
+      setNotice("Enter valid cost and wholesale prices, and a retail price above ₱0.");
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.from("products").update({
+        cost_price: costPrice,
+        wholesale_price: wholesalePrice,
+        price: retailPrice,
+      }).eq("id", editingProductPrices.id);
+      if (error) throw error;
+      const productName = editingProductPrices.name;
+      setEditingProductPrices(null);
+      setNotice(`${productName} prices updated.`);
+      try {
+        await refreshWorkspace();
+      } catch (error) {
+        setNotice(`${productName} prices were updated, but the catalog could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Unable to update product prices.");
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -1176,6 +1244,7 @@ export default function Home() {
               <InventoryView
                 products={products}
                 onAdd={() => { setSelectedProductIcon("auto"); setSelectedProductImage(null); setShowAddProduct(true); }}
+                onEditPrices={setEditingProductPrices}
                 onEditImage={(product) => {
                   setSelectedProductIcon(product.imageIcon);
                   setSelectedProductImage(null);
@@ -1246,11 +1315,7 @@ export default function Home() {
                   subtotal={subtotal}
                   total={total}
                   onChange={changeQuantity}
-                  onCheckout={checkout}
-                  paymentMethod={paymentMethod}
-                  onPaymentMethodChange={(method) => { setPaymentMethod(method); setGcashReferenceLast4(""); }}
-                  gcashReferenceLast4={gcashReferenceLast4}
-                  onGcashReferenceChange={setGcashReferenceLast4}
+                  onCheckout={() => { setNotice(""); setShowCheckoutDialog(true); }}
                   isProcessing={isLoading}
                   onClear={() => setCart({})}
                 />
@@ -1261,6 +1326,45 @@ export default function Home() {
         </div>
       </div>
 
+      {showCheckoutDialog && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/50 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) setShowCheckoutDialog(false); }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="checkout-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-5 flex items-start justify-between">
+              <div><p className="text-xs font-semibold text-blue-600">PAYMENT</p><h2 id="checkout-title" className="mt-1 text-xl font-semibold">Complete checkout</h2><p className="mt-1 text-sm text-slate-500">{itemCount} item{itemCount === 1 ? "" : "s"} · {money(total)} due</p></div>
+              <button type="button" aria-label="Close checkout dialog" disabled={isLoading} onClick={() => setShowCheckoutDialog(false)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
+            </div>
+            <fieldset className="space-y-2">
+              <legend className="mb-2 text-sm font-semibold text-slate-700">Choose payment method</legend>
+              <div className="grid grid-cols-3 gap-2">
+                {([
+                  { method: "cash", label: "Cash", Icon: Banknote },
+                  { method: "e_wallet", label: "E-Wallet", Icon: WalletCards },
+                  { method: "card", label: "Card", Icon: CreditCard },
+                ] as const).map(({ method, label, Icon }) => (
+                  <button key={method} type="button" aria-pressed={paymentMethod === method} onClick={() => { setPaymentMethod(method); setCashReceived(""); setPaymentReferenceLast4(""); }} className={`flex h-12 flex-col items-center justify-center gap-1 rounded-lg border text-xs font-semibold ${paymentMethod === method ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:border-blue-200"}`}><Icon size={16} />{label}</button>
+                ))}
+              </div>
+            </fieldset>
+            {paymentMethod === "cash" ? (
+              <div className="mt-4 space-y-3 rounded-xl bg-slate-50 p-4">
+                <label className="block text-sm font-medium text-slate-700">Cash received (₱)
+                  <input autoFocus required type="number" min={total} step="0.01" inputMode="decimal" value={cashReceived} onChange={(event) => setCashReceived(event.currentTarget.value)} placeholder={total.toFixed(2)} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" />
+                </label>
+                <div className="flex items-center justify-between border-t border-slate-200 pt-3 text-sm"><span className="font-medium text-slate-500">Change due</span><span className="font-bold text-slate-900">{money(Math.max(0, (Number(cashReceived) || 0) - total))}</span></div>
+              </div>
+            ) : (
+              <label className="mt-4 block text-sm font-medium text-slate-700">{paymentMethod === "e_wallet" ? "E-Wallet" : "Card"} reference · last 4 digits
+                <input autoFocus required type="text" inputMode="numeric" autoComplete="off" maxLength={4} pattern="[0-9]{4}" value={paymentReferenceLast4} onChange={(event) => setPaymentReferenceLast4(event.currentTarget.value.replace(/\D/g, "").slice(0, 4))} placeholder="1234" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm tracking-[0.2em] outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" />
+              </label>
+            )}
+            {notice && <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{notice}</p>}
+            <div className="mt-5 flex gap-3">
+              <button type="button" disabled={isLoading} onClick={() => { setShowCheckoutDialog(false); setNotice(""); }} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button>
+              <button type="button" disabled={isLoading || !itemCount} onClick={checkout} className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">{isLoading ? "Processing…" : "Confirm payment"}</button>
+            </div>
+          </div>
+        </div>
+      )}
       {showAddProduct && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); } }}>
           <div role="dialog" aria-modal="true" aria-labelledby="add-product-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
@@ -1271,7 +1375,9 @@ export default function Home() {
             <form onSubmit={addProduct} className="max-h-[80vh] space-y-4 overflow-y-auto pr-1">
               <label className="block text-sm font-medium text-slate-700">Product name<input required name="name" placeholder="e.g. Sardines (155 g)" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <div className="grid grid-cols-2 gap-3">
-                <label className="block text-sm font-medium text-slate-700">Price (₱)<input required name="price" type="number" min="0.01" step="0.01" placeholder="25.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+                <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" placeholder="18.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+                <label className="block text-sm font-medium text-slate-700">Wholesale price (₱)<input required name="wholesale_price" type="number" min="0" step="0.01" placeholder="22.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+                <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" placeholder="25.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
                 <label className="block text-sm font-medium text-slate-700">Stock<input required name="stock" type="number" min="0" step="1" placeholder="12" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               </div>
               <label className="block text-sm font-medium text-slate-700">Category<select name="category" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50">{categories.filter((item) => item !== "All items").map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
@@ -1282,6 +1388,22 @@ export default function Home() {
                 onImageChange={setSelectedProductImage}
               />
               <div className="flex gap-3 pt-2"><button type="button" onClick={() => { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add product</button></div>
+            </form>
+          </div>
+        </div>
+      )}
+      {editingProductPrices && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) setEditingProductPrices(null); }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="edit-product-prices-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="mb-5 flex items-start justify-between">
+              <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="edit-product-prices-title" className="mt-1 text-xl font-semibold">Update product prices</h2><p className="mt-1 text-sm text-slate-500">{editingProductPrices.name}</p></div>
+              <button type="button" aria-label="Close price editor" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
+            </div>
+            <form onSubmit={saveProductPrices} className="space-y-4">
+              <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.costPrice} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <label className="block text-sm font-medium text-slate-700">Wholesale price (₱)<input required name="wholesale_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.wholesalePrice} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" defaultValue={editingProductPrices.price} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button><button disabled={isLoading} type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : "Save prices"}</button></div>
             </form>
           </div>
         </div>
@@ -1391,7 +1513,7 @@ function AdminOverview({
         </div>
         <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Recent sales</h2><p className="mt-1 text-xs text-slate-400">Latest completed transactions</p></div><button type="button" onClick={onViewOrders} className="text-xs font-semibold text-blue-600 hover:text-blue-700">All orders <ArrowRight size={13} className="ml-1 inline" /></button></div>
-          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName} · {order.paymentMethod === "gcash" ? "GCash" : "Cash"}</p></div><p className="text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
+          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName} · {paymentMethodLabel(order.paymentMethod)}</p></div><p className="text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
         </div>
       </div>
     </section>
@@ -1405,13 +1527,14 @@ function periodLabel(period: SalesPeriod) {
 }
 
 function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: SalesPeriod }) {
-  const [paymentFilter, setPaymentFilter] = useState<"all" | "cash" | "gcash">("all");
+  const [paymentFilter, setPaymentFilter] = useState<"all" | PaymentMethod>("all");
   const visibleAmounts = rows.map((row) => ({
     ...row,
-    cash: paymentFilter === "gcash" ? 0 : row.cash,
-    gcash: paymentFilter === "cash" ? 0 : row.gcash,
+    cash: paymentFilter === "all" || paymentFilter === "cash" ? row.cash : 0,
+    eWallet: paymentFilter === "all" || paymentFilter === "e_wallet" ? row.eWallet : 0,
+    card: paymentFilter === "all" || paymentFilter === "card" ? row.card : 0,
   }));
-  const maxTotal = Math.max(1, ...visibleAmounts.map((row) => row.cash + row.gcash));
+  const maxTotal = Math.max(1, ...visibleAmounts.map((row) => row.cash + row.eWallet + row.card));
   const showLabel = (index: number) => {
     if (rows.length <= 7) return true;
     const interval = rows.length <= 24 ? 4 : 5;
@@ -1423,9 +1546,9 @@ function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: Sal
       <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center">
         <div><h2 className="text-sm font-semibold">Sales by payment method</h2><p className="mt-1 text-xs text-slate-400">{periodLabel(period)} · PHP</p></div>
         <div className="flex gap-1 rounded-lg bg-slate-50 p-1" aria-label="Filter sales chart by payment method">
-          {(["all", "cash", "gcash"] as const).map((method) => (
+          {(["all", "cash", "e_wallet", "card"] as const).map((method) => (
             <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
-              {method === "all" ? "All" : method === "gcash" ? "GCash" : "Cash"}
+              {method === "all" ? "All" : paymentMethodLabel(method)}
             </button>
           ))}
         </div>
@@ -1433,7 +1556,8 @@ function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: Sal
       <div className="px-4 py-4 sm:px-5">
         <div className="mb-3 flex items-center gap-4 text-[10px] text-slate-500">
           {(paymentFilter === "all" || paymentFilter === "cash") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-blue-500" />Cash</span>}
-          {(paymentFilter === "all" || paymentFilter === "gcash") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-violet-500" />GCash</span>}
+          {(paymentFilter === "all" || paymentFilter === "e_wallet") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-violet-500" />E-Wallet</span>}
+          {(paymentFilter === "all" || paymentFilter === "card") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-amber-500" />Card</span>}
         </div>
         {rows.length ? (
           <div className="relative">
@@ -1443,12 +1567,14 @@ function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: Sal
             <div className="relative flex h-36 items-end gap-1">
               {visibleAmounts.map((row, index) => {
                 const cashHeight = row.cash / maxTotal * 100;
-                const gcashHeight = row.gcash / maxTotal * 100;
+                const eWalletHeight = row.eWallet / maxTotal * 100;
+                const cardHeight = row.card / maxTotal * 100;
                 return (
-                  <div key={`${row.label}-${index}`} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={`${row.label}: Cash ${money(row.cash)} · GCash ${money(row.gcash)}`}>
+                  <div key={`${row.label}-${index}`} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={`${row.label}: Cash ${money(row.cash)} · E-Wallet ${money(row.eWallet)} · Card ${money(row.card)}`}>
                     <div className="flex h-full items-end justify-center gap-[2px]">
                       {(paymentFilter === "all" || paymentFilter === "cash") && <div className="w-1/2 max-w-5 rounded-t bg-blue-500 transition-[height]" style={{ height: `${cashHeight}%` }} />}
-                      {(paymentFilter === "all" || paymentFilter === "gcash") && <div className="w-1/2 max-w-5 rounded-t bg-violet-500 transition-[height]" style={{ height: `${gcashHeight}%` }} />}
+                      {(paymentFilter === "all" || paymentFilter === "e_wallet") && <div className="w-1/2 max-w-5 rounded-t bg-violet-500 transition-[height]" style={{ height: `${eWalletHeight}%` }} />}
+                      {(paymentFilter === "all" || paymentFilter === "card") && <div className="w-1/2 max-w-5 rounded-t bg-amber-500 transition-[height]" style={{ height: `${cardHeight}%` }} />}
                     </div>
                     <span className={`mt-2 h-3 truncate text-center text-[8px] text-slate-400 sm:text-[9px] ${showLabel(index) ? "" : "invisible"}`}>{row.label}</span>
                   </div>
@@ -1477,11 +1603,11 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
         <div className="divide-y divide-slate-100 rounded-xl border border-slate-100 px-4">
           <details className="py-3" open>
             <summary className="cursor-pointer text-sm font-semibold">How do I complete a sale?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Open Point of sale, add products to the cart, choose Cash or GCash, and confirm the checkout. Stock is deducted when the order is recorded.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Open Point of sale, add products to the cart, choose Cash, E-Wallet, or Card, and confirm the checkout. Stock is deducted when the order is recorded.</p>
           </details>
           <details className="py-3">
-            <summary className="cursor-pointer text-sm font-semibold">How do I record a GCash payment?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">First verify the payment in your store&apos;s GCash account. Select GCash in the cart and enter the final 4 digits of the transaction reference before recording the sale. The POS records the reference digits; it does not verify or process the transfer itself.</p>
+            <summary className="cursor-pointer text-sm font-semibold">How do I record an E-Wallet or card payment?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Confirm the payment with the provider, then choose E-Wallet or Card in the checkout dialog and enter the last 4 digits of its reference number. The POS records those digits but does not process or verify the payment.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I add stock or update product photos?</summary>
@@ -1489,7 +1615,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">Where can I find completed sales?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Open Orders to review recent transactions, totals, payment methods, and any recorded GCash reference digits.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Open Orders to review recent transactions, totals, payment methods, cash received, change due, and payment reference digits.</p>
           </details>
         </div>
         <div className="mt-5 flex flex-wrap gap-2">
@@ -1599,7 +1725,7 @@ function ProductImagePicker({
   );
 }
 
-function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, paymentMethod, onPaymentMethodChange, gcashReferenceLast4, onGcashReferenceChange, onClear, isProcessing }: {
+function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing }: {
   items: Product[];
   quantities: Record<string, number>;
   count: number;
@@ -1607,10 +1733,6 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
   total: number;
   onChange: (productId: string, difference: number) => void;
   onCheckout: () => void;
-  paymentMethod: "cash" | "gcash";
-  onPaymentMethodChange: (method: "cash" | "gcash") => void;
-  gcashReferenceLast4: string;
-  onGcashReferenceChange: (reference: string) => void;
   onClear: () => void;
   isProcessing: boolean;
 }) {
@@ -1630,42 +1752,17 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
       </div>
       <div className="border-t border-slate-100 px-5 py-4">
         <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(subtotal)}</span></div><div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
-        <fieldset className="mt-4 space-y-2">
-          <legend className="mb-2 text-xs font-semibold text-slate-700">Payment method</legend>
-          <div className="grid grid-cols-2 gap-2">
-            <button type="button" aria-pressed={paymentMethod === "cash"} onClick={() => onPaymentMethodChange("cash")} className={`flex h-10 items-center justify-center gap-2 rounded-lg border text-xs font-semibold ${paymentMethod === "cash" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:border-blue-200"}`}><Banknote size={15} /> Cash</button>
-            <button type="button" aria-pressed={paymentMethod === "gcash"} onClick={() => onPaymentMethodChange("gcash")} className={`flex h-10 items-center justify-center gap-2 rounded-lg border text-xs font-semibold ${paymentMethod === "gcash" ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:border-blue-200"}`}><WalletCards size={15} /> GCash</button>
-          </div>
-          {paymentMethod === "gcash" && (
-            <div className="space-y-2 rounded-lg bg-sky-50 p-3">
-              <p className="text-[11px] leading-4 text-sky-800">Confirm the payment in your store&apos;s GCash account, then enter the last 4 digits of its reference number.</p>
-              <label className="block text-[11px] font-medium text-slate-600">GCash reference · last 4 digits
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="off"
-                  maxLength={4}
-                  pattern="[0-9]{4}"
-                  aria-label="Last four digits of GCash reference"
-                  value={gcashReferenceLast4}
-                  onChange={(event) => onGcashReferenceChange(event.currentTarget.value.replace(/\D/g, "").slice(0, 4))}
-                  placeholder="1234"
-                  className="mt-1 h-9 w-full rounded-md border border-sky-200 bg-white px-3 text-sm tracking-[0.2em] outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                />
-              </label>
-            </div>
-          )}
-        </fieldset>
-        <button type="button" disabled={!count || isProcessing} onClick={onCheckout} className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : paymentMethod === "gcash" ? `Record GCash · ${money(total)}` : `Charge ${money(total)}`}</button>
+        <button type="button" disabled={!count || isProcessing} onClick={onCheckout} className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : `Continue to payment · ${money(total)}`}</button>
         <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-slate-400"><WalletCards size={13} /> Secure, fast checkout</p>
       </div>
     </aside>
   );
 }
 
-function InventoryView({ products, onAdd, onEditImage, onRemove, onImport, isImporting, onRestock }: {
+function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, onImport, isImporting, onRestock }: {
   products: Product[];
   onAdd: () => void;
+  onEditPrices: (product: Product) => void;
   onEditImage: (product: Product) => void;
   onRemove: (product: Product) => void;
   onImport: (file: File) => void;
@@ -1682,7 +1779,7 @@ function InventoryView({ products, onAdd, onEditImage, onRemove, onImport, isImp
           <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><PackagePlus size={16} /> Add product</button>
         </div>
       </div>
-      <p className="mb-4 text-xs text-slate-400">Import CSV or JSON with <code className="rounded bg-slate-100 px-1 py-0.5">name, category, price, stock</code> fields. Matching product names are updated.</p>
+      <p className="mb-4 text-xs text-slate-400">Import CSV or JSON with <code className="rounded bg-slate-100 px-1 py-0.5">name, category, cost_price, wholesale_price, retail_price, stock</code> fields. Older imports with <code className="rounded bg-slate-100 px-1 py-0.5">price</code> remain supported.</p>
       <div className="mb-5 grid gap-3 sm:grid-cols-3">
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Total products</p><p className="mt-2 text-2xl font-semibold">{products.length}</p></div>
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Units in stock</p><p className="mt-2 text-2xl font-semibold">{products.reduce((sum, product) => sum + product.stock, 0)}</p></div>
@@ -1690,7 +1787,7 @@ function InventoryView({ products, onAdd, onEditImage, onRemove, onImport, isImp
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[680px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{money(product.costPrice)}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditPrices(product)} aria-label={`Edit prices for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><CircleDollarSign size={14} /> Prices</button><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
       </div>
     </section>
   );
@@ -1773,7 +1870,7 @@ function AccountView({
 }
 
 function OrdersView({ orders }: { orders: Order[] }) {
-  const [paymentFilter, setPaymentFilter] = useState<"all" | "cash" | "gcash">("all");
+  const [paymentFilter, setPaymentFilter] = useState<"all" | PaymentMethod>("all");
   const visibleOrders = orders.filter((order) => paymentFilter === "all" || order.paymentMethod === paymentFilter);
   return (
     <section>
@@ -1782,11 +1879,11 @@ function OrdersView({ orders }: { orders: Order[] }) {
         <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center">
           <div><h2 className="text-sm font-semibold">Order history</h2><p className="mt-1 text-xs text-slate-400">Showing {visibleOrders.length} of {orders.length} recent transactions</p></div>
           <div className="flex gap-1 rounded-lg bg-slate-50 p-1" aria-label="Filter orders by payment method">
-            {(["all", "cash", "gcash"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : method === "gcash" ? "GCash" : "Cash"}</button>)}
+            {(["all", "cash", "e_wallet", "card"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : paymentMethodLabel(method)}</button>)}
           </div>
         </div>
-        <div className="divide-y divide-slate-100">{visibleOrders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div className="min-w-0"><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p><p className="mt-1 text-xs font-medium text-slate-600">{order.employeeName}</p><p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">{order.paymentMethod === "gcash" ? `GCash · Ref •••• ${order.gcashReferenceLast4 ?? "—"}` : "Cash"}</p></div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
-        {visibleOrders.length === 0 && <div className="py-16 text-center text-sm text-slate-400">{orders.length ? `No ${paymentFilter === "gcash" ? "GCash" : "cash"} orders in the recent transactions.` : "No orders yet. Completed sales will show up here."}</div>}
+        <div className="divide-y divide-slate-100">{visibleOrders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div className="min-w-0"><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p><p className="mt-1 text-xs font-medium text-slate-600">{order.employeeName}</p><p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">{paymentMethodLabel(order.paymentMethod)}{order.paymentReferenceLast4 ? ` · Ref •••• ${order.paymentReferenceLast4}` : ""}</p>{order.paymentMethod === "cash" && order.cashReceived !== null && <p className="mt-1 text-[10px] text-slate-400">Received {money(order.cashReceived)} · Change {money(order.changeDue ?? 0)}</p>}</div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
+        {visibleOrders.length === 0 && <div className="py-16 text-center text-sm text-slate-400">{orders.length ? `No ${paymentFilter === "all" ? "" : `${paymentMethodLabel(paymentFilter)} `}orders in the recent transactions.` : "No orders yet. Completed sales will show up here."}</div>}
       </div>
     </section>
   );
