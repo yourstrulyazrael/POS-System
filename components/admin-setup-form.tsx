@@ -3,6 +3,8 @@
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { ArrowLeft, Coffee, LoaderCircle, ShieldCheck } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { callPosAdmin, createClient } from "@/lib/supabase/client";
 import { FormEvent, useEffect, useState } from "react";
 
 export function AdminSetupForm() {
@@ -10,17 +12,22 @@ export function AdminSetupForm() {
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
+  const router = useRouter();
+
   useEffect(() => {
-    fetch("/api/setup-admin")
-      .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error ?? "Unable to check admin setup.");
-        setAvailable(data.available);
-      })
-      .catch((cause: unknown) => {
+    let active = true;
+    (async () => {
+      try {
+        const { data, error: rpcError } = await createClient().rpc("is_admin_setup_available");
+        if (rpcError) throw new Error(`Unable to check admin setup: ${rpcError.message}`);
+        if (active) setAvailable(data === true);
+      } catch (cause) {
+        if (!active) return;
         setError(cause instanceof Error ? cause.message : "Unable to check admin setup.");
         setAvailable(false);
-      });
+      }
+    })();
+    return () => { active = false; };
   }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -29,19 +36,14 @@ export function AdminSetupForm() {
     setError("");
     const formData = new FormData(event.currentTarget);
     try {
-      const response = await fetch("/api/setup-admin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fullName: formData.get("fullName"),
-          email: formData.get("email"),
-          password: formData.get("password"),
-          setupSecret: formData.get("setupSecret"),
-        }),
+      await callPosAdmin({
+        action: "setup-first-admin",
+        fullName: String(formData.get("fullName") ?? ""),
+        email: String(formData.get("email") ?? ""),
+        password: String(formData.get("password") ?? ""),
+        setupSecret: String(formData.get("setupSecret") ?? ""),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Unable to create the admin account.");
-      window.location.assign("/auth/login?admin-created=1");
+      router.replace("/?admin-created=1");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to create the admin account.");
     } finally {
@@ -65,7 +67,7 @@ export function AdminSetupForm() {
             <label className="block text-sm font-medium text-slate-700">Full name<input required maxLength={100} name="fullName" autoComplete="name" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
             <label className="block text-sm font-medium text-slate-700">Admin email<input required type="email" name="email" autoComplete="email" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
             <label className="block text-sm font-medium text-slate-700">Password<input required minLength={8} type="password" name="password" autoComplete="new-password" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /><span className="mt-1 block text-xs font-normal text-slate-400">Use at least 8 characters.</span></label>
-            <label className="block text-sm font-medium text-slate-700">One-time setup key<input required type="password" name="setupSecret" autoComplete="off" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /><span className="mt-1 block text-xs font-normal text-slate-400">This must match POS_SETUP_SECRET in your server environment.</span></label>
+            <label className="block text-sm font-medium text-slate-700">One-time setup key<input required type="password" name="setupSecret" autoComplete="off" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /><span className="mt-1 block text-xs font-normal text-slate-400">The POS_SETUP_SECRET value set on the pos-admin Edge Function.</span></label>
             {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
             <button disabled={isSaving} className="flex h-11 w-full items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60"><ShieldCheck size={16} />{isSaving ? "Creating account…" : "Create first admin"}</button>
           </form>

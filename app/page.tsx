@@ -10,6 +10,9 @@ import {
   ChevronDown,
   CircleDollarSign,
   ClipboardList,
+  Cloud,
+  CloudOff,
+  CloudUpload,
   EllipsisVertical,
   Clock3,
   Coffee,
@@ -21,6 +24,8 @@ import {
   FileSpreadsheet,
   FileUp,
   ImageIcon,
+  Info,
+  KeyRound,
   ImageOff,
   PenLine,
   Printer,
@@ -38,14 +43,17 @@ import {
   Sparkles,
   Store,
   Trash2,
+  TriangleAlert,
   UserRound,
   Users,
+  WifiOff,
   UserPlus,
   WalletCards,
   X,
   type LucideIcon,
 } from "lucide-react";
-import { createClient } from "@/lib/supabase/client";
+import { AUTH_STORAGE_KEY, callPosAdmin, createClient } from "@/lib/supabase/client";
+import { deletePendingOrder, isNetworkError, listPendingOrders, readCache, savePendingOrder, storedSessionUserId, writeCache, type PendingOrder } from "@/lib/offline-store";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { AnalyticsReportsView } from "@/components/analytics-reports";
 import { SmoothLineChart } from "@/components/smooth-line-chart";
@@ -75,7 +83,7 @@ type Product = {
   color: string;
 };
 type OrderLine = { name: string; quantity: number; unitPrice: number; custom: boolean };
-type Order = { id: string; fullId: string; items: number; total: number; time: string; createdAt: Date; lines: OrderLine[]; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string; isWholesale: boolean };
+type Order = { id: string; fullId: string; items: number; total: number; time: string; createdAt: Date; lines: OrderLine[]; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string; isWholesale: boolean; syncStatus?: "pending" | "failed"; syncError?: string | null };
 type SalesChartPoint = { label: string; cash: number; eWallet: number; card: number };
 type ProfitReportPoint = {
   label: string;
@@ -109,6 +117,8 @@ type OrderRow = {
   employee_id?: string | null;
   is_wholesale: boolean;
 };
+// A destructive action waiting for the user to confirm it.
+type ConfirmAction = { title: string; message: string; confirmLabel: string; onConfirm: () => Promise<void> };
 // A "Quick Add" line for something not in the product catalog.
 type CustomItem = { id: string; description: string; quantity: number; unitPrice: number };
 type Employee = { id: string; email: string; full_name: string; role: "employee" };
@@ -178,6 +188,45 @@ function productAppearance(name: string, category: string, index: number, imageI
   };
 }
 
+type Workspace = Awaited<ReturnType<typeof fetchWorkspaceData>>;
+type CachedProfile = { role: Role; fullName: string; email: string };
+type StockShortfall = { id: string; productName: string; shortfall: number; createdAt: Date };
+
+// A sale waiting in the offline queue, shown alongside synced orders.
+function pendingToOrder(sale: PendingOrder): Order {
+  const createdAt = new Date(sale.createdAt);
+  return {
+    id: `#${sale.clientOrderId.slice(0, 8)}`,
+    fullId: sale.clientOrderId,
+    createdAt,
+    lines: sale.items.map((item) => ({
+      name: item.kind === "product" ? item.name : item.description,
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      custom: item.kind === "custom",
+    })),
+    items: sale.items.reduce((sum, item) => sum + item.quantity, 0),
+    total: sale.total,
+    time: createdAt.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
+    paymentMethod: sale.paymentMethod,
+    paymentReferenceLast4: sale.paymentReferenceLast4,
+    cashReceived: sale.cashReceived,
+    changeDue: sale.cashReceived === null ? null : Math.round((sale.cashReceived - sale.total) * 100) / 100,
+    employeeName: sale.employeeName,
+    isWholesale: sale.wholesale,
+    syncStatus: sale.failed ? "failed" : "pending",
+    syncError: sale.lastError,
+  };
+}
+
+// Problems that mean "try again later" rather than "the server refused this":
+// no connection, or a session that needs refreshing once back online.
+function isTransientSyncError(error: unknown) {
+  if (isNetworkError(error)) return true;
+  const message = error && typeof error === "object" && "message" in error ? String((error as { message: unknown }).message) : "";
+  return /jwt|token|session|authentication required|503|502|504/i.test(message);
+}
+
 async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod = "today") {
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
@@ -188,11 +237,22 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
   if (ordersResult.error) throw new Error(`Unable to load orders: ${ordersResult.error.message}`);
   let stats: DashboardStats | null = null;
   let salesChart: SalesChartPoint[] = [];
+  let shortfalls: StockShortfall[] = [];
   if (includeAdminStats) {
-    const [{ data, error }, { data: chartRows, error: chartError }] = await Promise.all([
+    const [{ data, error }, { data: chartRows, error: chartError }, shortfallResult] = await Promise.all([
       supabase.rpc("get_admin_dashboard_stats", { p_period: period }).single(),
       supabase.rpc("get_admin_sales_chart", { p_period: period }),
+      supabase.from("stock_shortfalls").select("id, product_name, shortfall, created_at").is("resolved_at", null).order("created_at", { ascending: false }).limit(100),
     ]);
+    // Optional: missing until the offline-sync migration is applied.
+    if (!shortfallResult.error) {
+      shortfalls = (shortfallResult.data ?? []).map((row: { id: string; product_name: string; shortfall: number; created_at: string }) => ({
+        id: row.id,
+        productName: row.product_name,
+        shortfall: Number(row.shortfall),
+        createdAt: new Date(row.created_at),
+      }));
+    }
     if (error) throw new Error(`Unable to load store summary: ${error.message}`);
     if (chartError) throw new Error(`Unable to load sales chart: ${chartError.message}`);
     if (
@@ -221,8 +281,11 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
     }));
   }
   return {
-    products: productsResult.data.map((product, index) => ({
-      ...product,
+    products: productsResult.data.map((product, index): Product => ({
+      id: product.id,
+      name: product.name,
+      category: product.category,
+      stock: product.stock,
       costPrice: Number(product.cost_price),
       costPriceKnown: product.cost_price_known,
       wholesalePrice: Number(product.wholesale_price),
@@ -250,6 +313,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
     })),
     stats,
     salesChart,
+    shortfalls,
   };
 }
 
@@ -279,6 +343,9 @@ function normalizeBarcode(value: unknown) {
 }
 
 function productSaveError(error: unknown, fallback: string) {
+  if (isNetworkError(error)) {
+    return "This needs an internet connection. Sales still work offline; try this again once you’re back online.";
+  }
   if (error && typeof error === "object" && "code" in error && error.code === "23505" && "message" in error && String(error.message).includes("barcode")) {
     return "Another active product already uses that barcode.";
   }
@@ -410,11 +477,25 @@ export default function Home() {
   const [salesResetConfirmation, setSalesResetConfirmation] = useState("");
   const [notice, setNotice] = useState("");
   const [authError, setAuthError] = useState("");
+  const [adminCreated, setAdminCreated] = useState(false);
+  const [isOnline, setIsOnline] = useState(true);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [usingCachedData, setUsingCachedData] = useState(false);
+  // Supabase couldn't be reached even though the device reports a network
+  // (e.g. Wi-Fi without internet). Cleared by the next successful request.
+  const [serverUnreachable, setServerUnreachable] = useState(false);
+  const [shortfalls, setShortfalls] = useState<StockShortfall[]>([]);
+  const [showSyncPanel, setShowSyncPanel] = useState(false);
+  const syncingRef = useRef(false);
   const [isLoading, setIsLoading] = useState(false);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [showAddEmployee, setShowAddEmployee] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<ConfirmAction | null>(null);
+  const [passwordEmployee, setPasswordEmployee] = useState<Employee | null>(null);
   const [restockProduct, setRestockProduct] = useState<Product | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -457,6 +538,12 @@ export default function Home() {
         message: `${product.name} has ${product.stock} left.`,
         page: "inventory" as const,
       })),
+    ...shortfalls.map((item) => ({
+      id: `shortfall-${item.id}`,
+      title: "Recount needed",
+      message: `An offline sale sold ${item.shortfall} more ${item.productName} than recorded stock.`,
+      page: "inventory" as const,
+    })),
     ...orders.slice(0, 5).map((order) => ({
       id: `order-${order.id}`,
       title: "Recent sale",
@@ -466,36 +553,83 @@ export default function Home() {
   ];
   const unreadNotificationCount = notifications.filter((item) => !readNotifications.includes(item.id)).length;
 
+  // Shows a workspace and keeps a copy on this device, so the POS can open
+  // and keep selling if the connection drops later. Cached per user, because
+  // employees only see their own orders.
+  const applyWorkspace = useCallback((workspace: Workspace, ownerId: string, fromCache = false) => {
+    setProducts(workspace.products);
+    setOrders(workspace.orders);
+    setDashboardStats(workspace.stats);
+    setSalesChart(workspace.salesChart);
+    setShortfalls(workspace.shortfalls ?? []);
+    setUsingCachedData(fromCache);
+    if (!fromCache) setServerUnreachable(false);
+    if (!fromCache) {
+      setLastRefreshedAt(new Date());
+      void writeCache(`workspace:${ownerId}`, workspace).catch((error: unknown) => console.error("Couldn’t cache the workspace for offline use:", error));
+    }
+  }, []);
+
+  const signInWith = useCallback((id: string, profile: CachedProfile, workspace: Workspace, fromCache: boolean) => {
+    setUserId(id);
+    setRole(profile.role);
+    setEmployeeName(profile.fullName || profile.email || "Team member");
+    setAccountName(profile.fullName);
+    setAccountEmail(profile.email);
+    applyWorkspace(workspace, id, fromCache);
+    setSignedIn(true);
+    if (!fromCache) void writeCache(`profile:${id}`, profile).catch(() => undefined);
+  }, [applyWorkspace]);
+
   useEffect(() => {
     let cancelled = false;
+    setAdminCreated(new URLSearchParams(window.location.search).has("admin-created"));
+    void listPendingOrders().then((queue) => { if (!cancelled) setPendingOrders(queue); }).catch((error: unknown) => console.error("Couldn’t read offline sales:", error));
+
+    // Opens the last workspace saved on this device for the signed-in user.
+    async function openOffline(id: string) {
+      const [profile, workspace] = await Promise.all([readCache<CachedProfile>(`profile:${id}`), readCache<Workspace>(`workspace:${id}`)]);
+      if (!profile || !workspace) {
+        throw new Error("You’re offline, and this computer has no saved store data for your account yet. Connect to the internet once to sign in.");
+      }
+      if (cancelled) return;
+      signInWith(id, profile, workspace, true);
+      setServerUnreachable(true);
+      if (profile.role === "admin") setActivePage("dashboard");
+    }
+
     async function restoreSession() {
       try {
+        // Read the saved session without a network call, so a signed-out
+        // launch shows the login screen immediately and an offline launch can
+        // reopen the saved workspace.
+        const savedUserId = storedSessionUserId(AUTH_STORAGE_KEY);
+        if (!savedUserId) return;
+        if (!navigator.onLine) return await openOffline(savedUserId);
+
         const supabase = createClient();
-        const { data: { user }, error } = await supabase.auth.getUser();
-        if (error && error.name !== "AuthSessionMissingError") throw error;
-        if (!user) return;
-        const { data: profile, error: profileError } = await supabase
-          .from("profiles")
-          .select("role, full_name")
-          .eq("id", user.id)
-          .single();
-        if (profileError) throw profileError;
-        if (profile.role !== "admin" && profile.role !== "employee") {
-          throw new Error("Your account does not have a valid store role.");
+        try {
+          const { data: { user }, error } = await supabase.auth.getUser();
+          if (error && error.name !== "AuthSessionMissingError") throw error;
+          if (!user) return;
+          const { data: profile, error: profileError } = await supabase
+            .from("profiles")
+            .select("role, full_name")
+            .eq("id", user.id)
+            .single();
+          if (profileError) throw profileError;
+          if (profile.role !== "admin" && profile.role !== "employee") {
+            throw new Error("Your account does not have a valid store role.");
+          }
+          const workspace = await fetchWorkspaceData(profile.role === "admin");
+          if (cancelled) return;
+          signInWith(user.id, { role: profile.role, fullName: profile.full_name || "", email: user.email ?? "" }, workspace, false);
+          if (profile.role === "admin") setActivePage("dashboard");
+        } catch (error) {
+          // Connection dropped or Supabase unreachable: use the saved copy.
+          if (isNetworkError(error)) return await openOffline(savedUserId);
+          throw error;
         }
-        const workspace = await fetchWorkspaceData(profile.role === "admin");
-        if (cancelled) return;
-        setRole(profile.role);
-        setEmployeeName(profile.full_name || user.email || "Team member");
-        setAccountName(profile.full_name || "");
-        setAccountEmail(user.email ?? "");
-        setProducts(workspace.products);
-        setOrders(workspace.orders);
-        setDashboardStats(workspace.stats);
-        setSalesChart(workspace.salesChart);
-        setLastRefreshedAt(new Date());
-        if (profile.role === "admin") setActivePage("dashboard");
-        setSignedIn(true);
       } catch (error) {
         if (!cancelled) setAuthError(error instanceof Error ? error.message : "Unable to restore your session.");
       } finally {
@@ -503,17 +637,136 @@ export default function Home() {
       }
     }
     void restoreSession();
-    return () => { cancelled = true; };
+    // If the session ends elsewhere (expired refresh token, password change),
+    // go back to the sign-in screen instead of failing on every request.
+    const { data: { subscription } } = createClient().auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_OUT" && !cancelled) {
+        setSignedIn(false);
+        setUserId(null);
+        setCart({});
+        setCustomItems([]);
+        setActivePage("pos");
+      }
+    });
+    return () => { cancelled = true; subscription.unsubscribe(); };
+  }, [signInWith]);
+
+  // Success messages clear themselves; anything else stays until dismissed.
+  const noticeIsSuccess = /successfully|\badded\b|\bAdded\b|updated|removed|created|cleared|copied|synced|saved offline/i.test(notice) && !/couldn|could not|unable|but /i.test(notice);
+  useEffect(() => {
+    if (!notice || !noticeIsSuccess || showCheckoutDialog) return;
+    const timer = window.setTimeout(() => setNotice((current) => (current === notice ? "" : current)), 5000);
+    return () => window.clearTimeout(timer);
+  }, [notice, noticeIsSuccess, showCheckoutDialog]);
+
+  // Online/offline drives the banner, the sync indicator and the sync engine.
+  useEffect(() => {
+    const update = () => setIsOnline(navigator.onLine);
+    update();
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
   }, []);
 
   const refreshWorkspace = useCallback(async (period = salesPeriod) => {
+    if (!userId) return;
     const workspace = await fetchWorkspaceData(role === "admin", period);
-    setProducts(workspace.products);
-    setOrders(workspace.orders);
-    setDashboardStats(workspace.stats);
-    setSalesChart(workspace.salesChart);
-    setLastRefreshedAt(new Date());
-  }, [role, salesPeriod]);
+    applyWorkspace(workspace, userId);
+  }, [applyWorkspace, role, salesPeriod, userId]);
+
+  // Uploads queued offline sales, oldest first. A sale leaves the queue only
+  // after Supabase confirms it; the server ignores a sale it already has, so
+  // retries never double-record. A sale the server refuses is kept and marked
+  // failed (retried only on request). Employees sync their own sales; an
+  // admin can sync everyone's queued on this computer.
+  const syncPendingOrders = useCallback(async ({ retryFailed = false, quiet = false } = {}) => {
+    if (syncingRef.current || !userId || !navigator.onLine) return;
+    syncingRef.current = true;
+    setIsSyncing(true);
+    let synced = 0;
+    let shortfallCount = 0;
+    let failed = 0;
+    try {
+      const queue = await listPendingOrders();
+      const supabase = createClient();
+      for (const sale of queue) {
+        if (sale.failed && !retryFailed) continue;
+        if (sale.employeeId !== userId && role !== "admin") continue;
+        const { data, error } = await supabase.rpc("sync_offline_order", {
+          p_client_order_id: sale.clientOrderId,
+          p_employee_id: sale.employeeId,
+          p_created_at: sale.createdAt,
+          p_items: sale.items.map((item) => item.kind === "product"
+            ? { product_id: item.productId, name: item.name, quantity: item.quantity, unit_price: item.unitPrice }
+            : { description: item.description, quantity: item.quantity, unit_price: item.unitPrice }),
+          p_payment_method: sale.paymentMethod,
+          p_payment_reference_last4: sale.paymentReferenceLast4,
+          p_cash_received: sale.cashReceived,
+          p_wholesale: sale.wholesale,
+        }).single();
+        if (error) {
+          if (isTransientSyncError(error)) {
+            if (isNetworkError(error)) setServerUnreachable(true);
+            break; // try again later
+          }
+          failed += 1;
+          await savePendingOrder({ ...sale, attempts: sale.attempts + 1, lastError: error.message, failed: true });
+          continue;
+        }
+        await deletePendingOrder(sale.clientOrderId);
+        setServerUnreachable(false);
+        synced += 1;
+        if (data && typeof data === "object" && "shortfalls" in data) shortfallCount += Number(data.shortfalls) || 0;
+      }
+    } catch (error) {
+      if (!quiet) setNotice(`Couldn’t sync offline sales: ${error instanceof Error ? error.message : "Unknown error"}`);
+    } finally {
+      setPendingOrders(await listPendingOrders().catch(() => []));
+      syncingRef.current = false;
+      setIsSyncing(false);
+    }
+    if (synced) {
+      setNotice(`${synced} offline sale${synced === 1 ? "" : "s"} synced${shortfallCount ? ` · ${shortfallCount} item${shortfallCount === 1 ? "" : "s"} sold more than recorded stock (see Inventory)` : ""}.`);
+      try {
+        await refreshWorkspace();
+      } catch {
+        // The sales are safe; the next refresh will show them.
+      }
+    }
+    if (failed) setNotice(`${failed} offline sale${failed === 1 ? "" : "s"} couldn’t be synced and ${failed === 1 ? "is" : "are"} kept on this computer. Open the sync status for details.`);
+  }, [refreshWorkspace, role, userId]);
+
+  const pendingForThisUser = useMemo(() => pendingOrders.filter((sale) => sale.employeeId === userId || role === "admin"), [pendingOrders, role, userId]);
+  const waitingToSync = pendingForThisUser.filter((sale) => !sale.failed).length;
+  // Queued sales appear in Orders and Recent sales (newest first) until synced.
+  const displayOrders = useMemo(() => [...pendingForThisUser.map(pendingToOrder).reverse(), ...orders], [orders, pendingForThisUser]);
+  const failedToSync = pendingForThisUser.filter((sale) => sale.failed).length;
+  // Reconnect loop. While Supabase is unreachable, or working from the saved
+  // copy, or sales are waiting: every 30 s (and right away when the device
+  // reports a network), reload fresh data, then upload queued sales.
+  const connected = isOnline && !serverUnreachable;
+  const needsReconnect = signedIn && (serverUnreachable || usingCachedData || waitingToSync > 0);
+  useEffect(() => {
+    if (!needsReconnect) return;
+    const attempt = async () => {
+      if (!navigator.onLine) return;
+      if (serverUnreachable || usingCachedData) {
+        try {
+          await refreshWorkspace();
+        } catch (error) {
+          if (isNetworkError(error)) return; // still unreachable
+          setServerUnreachable(false); // reachable, but the request was refused
+        }
+      }
+      await syncPendingOrders({ quiet: true });
+    };
+    if (isOnline) void attempt();
+    const timer = window.setInterval(() => void attempt(), 30_000);
+    return () => window.clearInterval(timer);
+  }, [isOnline, needsReconnect, refreshWorkspace, serverUnreachable, syncPendingOrders, usingCachedData]);
 
   const refreshDashboard = useCallback(async (period = salesPeriod, quiet = false) => {
     setIsRefreshing(true);
@@ -530,7 +783,8 @@ export default function Home() {
   useEffect(() => {
     if (!signedIn || role !== "admin") return;
     const timer = window.setInterval(() => {
-      void refreshDashboard(salesPeriod, true);
+      // Skipped offline: the dashboard keeps showing the last loaded figures.
+      if (navigator.onLine) void refreshDashboard(salesPeriod, true);
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [refreshDashboard, role, salesPeriod, signedIn]);
@@ -700,6 +954,9 @@ export default function Home() {
     else if (restockProduct) setRestockProduct(null);
     else if (quickAdd) setQuickAdd(null);
     else if (showImport) { if (!isImporting) setShowImport(false); }
+    else if (confirmAction) setConfirmAction(null);
+    else if (passwordEmployee) setPasswordEmployee(null);
+    else if (showSyncPanel) setShowSyncPanel(false);
     else if (showMobileCart) setShowMobileCart(false);
     else if (showNotifications) setShowNotifications(false);
     else return false;
@@ -710,7 +967,7 @@ export default function Home() {
     if (!signedIn || event.defaultPrevented || event.isComposing) return;
     const target = event.target as HTMLElement | null;
     const inTextField = !!target?.closest("input, textarea, select, [contenteditable='true']");
-    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport;
+    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport || !!confirmAction || !!passwordEmployee || showSyncPanel;
     const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
 
     if (event.key === "Escape") {
@@ -830,6 +1087,37 @@ export default function Home() {
       return;
     }
     setIsLoading(true);
+    // One id per checkout attempt. The server records an id only once, so if
+    // the connection drops mid-request the sale can be queued under the same
+    // id without risking a duplicate.
+    const sale: PendingOrder = {
+      clientOrderId: crypto.randomUUID(),
+      employeeId: userId ?? "",
+      employeeName: employeeName || "Team member",
+      createdAt: new Date().toISOString(),
+      items: [
+        ...cartItems.map((product) => ({ kind: "product" as const, productId: product.id, name: product.name, quantity: cart[product.id], unitPrice: unitPrice(product) })),
+        ...customItems.map((item) => ({ kind: "custom" as const, description: item.description, quantity: item.quantity, unitPrice: item.unitPrice })),
+      ],
+      paymentMethod,
+      paymentReferenceLast4: paymentMethod === "cash" ? null : paymentReferenceLast4,
+      cashReceived: receivedAmount,
+      wholesale: wholesaleMode,
+      total,
+      attempts: 0,
+      lastError: null,
+      failed: false,
+    };
+    if (!userId) {
+      setNotice("Your session isn’t ready yet. Sign out and sign in again.");
+      setIsLoading(false);
+      return;
+    }
+    if (!navigator.onLine) {
+      await saveSaleOffline(sale);
+      setIsLoading(false);
+      return;
+    }
     try {
       const supabase = createClient();
       const { data, error } = await supabase.rpc("place_order", {
@@ -838,12 +1126,15 @@ export default function Home() {
           ...customItems.map((item) => ({ description: item.description, quantity: item.quantity, unit_price: item.unitPrice })),
         ],
         p_payment_method: paymentMethod,
-        p_payment_reference_last4: paymentMethod === "cash" ? null : paymentReferenceLast4,
+        p_payment_reference_last4: sale.paymentReferenceLast4,
         p_cash_received: receivedAmount,
-        // Only sent when on, so retail checkout keeps working on databases
-        // that haven't applied the wholesale migration yet.
-        ...(wholesaleMode ? { p_wholesale: true } : {}),
+        p_wholesale: wholesaleMode,
+        p_client_order_id: sale.clientOrderId,
       }).single();
+      if (error && isNetworkError(error)) {
+        await saveSaleOffline(sale);
+        return;
+      }
       if (error) throw error;
       if (!data || typeof data !== "object" || !("order_id" in data) || typeof data.order_id !== "string") {
         throw new Error("Checkout completed, but the order confirmation was invalid.");
@@ -861,17 +1152,39 @@ export default function Home() {
         setNotice(`Order #${newOrderId} was placed, but the store data could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
       }
     } catch (error) {
-      if (wholesaleMode && error && typeof error === "object" && "code" in error && (error.code === "PGRST202" || error.code === "42883")) {
-        setNotice("Wholesale checkout needs the database update. Apply migration 202610120009_wholesale_checkout.sql, then retry.");
-      } else if (customItems.length && error && typeof error === "object" && "message" in error && /needs a product|duplicate product rows/.test(String(error.message))) {
-        // The pre-custom-item place_order rejects lines without a product.
-        setNotice("Custom items need the database update. Apply migration 202610120010_custom_order_items.sql, then retry.");
+      if (error && typeof error === "object" && "code" in error && (error.code === "PGRST202" || error.code === "42883")) {
+        setNotice("Checkout needs the latest database update. Apply the migrations in supabase/migrations (through 202610120012_offline_sales_sync.sql), then retry.");
       } else {
         setNotice(error instanceof Error ? error.message : error && typeof error === "object" && "message" in error ? String(error.message) : "Unable to complete checkout.");
       }
     } finally {
       setIsLoading(false);
     }
+  }
+
+  // Records a sale on this computer to sync later. The sale is on disk before
+  // anything else changes; if saving fails, the cart is left as it was.
+  async function saveSaleOffline(sale: PendingOrder) {
+    try {
+      await savePendingOrder(sale);
+    } catch (error) {
+      setNotice(`This sale could NOT be saved on this computer (${error instanceof Error ? error.message : "storage error"}). Keep the cart and write the sale down, or retry once online.`);
+      return;
+    }
+    setPendingOrders((current) => [...current.filter((item) => item.clientOrderId !== sale.clientOrderId), sale]);
+    setServerUnreachable(true);
+    // Reflect the sale in the local stock, here and in the saved copy.
+    const sold = new Map(sale.items.flatMap((item) => (item.kind === "product" ? [[item.productId, item.quantity] as const] : [])));
+    const updatedProducts = products.map((product) => (sold.has(product.id) ? { ...product, stock: Math.max(0, product.stock - (sold.get(product.id) ?? 0)) } : product));
+    setProducts(updatedProducts);
+    if (userId) {
+      void writeCache(`workspace:${userId}`, { products: updatedProducts, orders, stats: dashboardStats, salesChart, shortfalls } satisfies Workspace).catch(() => undefined);
+    }
+    clearOrder();
+    setShowCheckoutDialog(false);
+    setCashReceived("");
+    setPaymentReferenceLast4("");
+    setNotice(`Sale #${sale.clientOrderId.slice(0, 8)} saved offline on this computer. It will sync automatically when the connection is back.`);
   }
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
@@ -891,23 +1204,18 @@ export default function Home() {
         .eq("id", authData.user.id)
         .single();
       if (profileError) throw profileError;
-      if (profile.role !== role) {
-        await supabase.auth.signOut();
-        throw new Error(`This account is ${profile.role}. Select the ${profile.role} workspace to continue.`);
+      // The workspace follows the account's role; there's nothing to pick.
+      if (profile.role !== "admin" && profile.role !== "employee") {
+        await supabase.auth.signOut({ scope: "local" });
+        throw new Error("This account doesn’t have a store role yet. Ask an administrator to set it up.");
       }
       const workspace = await fetchWorkspaceData(profile.role === "admin", salesPeriod);
-      setEmployeeName(profile.full_name || authData.user.email || "Team member");
-      setAccountName(profile.full_name || "");
-      setAccountEmail(authData.user.email ?? "");
-      setProducts(workspace.products);
-      setOrders(workspace.orders);
-      setDashboardStats(workspace.stats);
-      setSalesChart(workspace.salesChart);
-      setLastRefreshedAt(new Date());
+      signInWith(authData.user.id, { role: profile.role, fullName: profile.full_name || "", email: authData.user.email ?? "" }, workspace, false);
       setActivePage(profile.role === "admin" ? "dashboard" : "pos");
-      setSignedIn(true);
     } catch (error) {
-      setAuthError(error instanceof Error ? error.message : "Unable to sign in.");
+      setAuthError(isNetworkError(error)
+        ? "You’re offline. Signing in needs an internet connection; a cashier who’s already signed in on this computer can keep selling offline."
+        : error instanceof Error ? error.message : "Unable to sign in.");
     } finally {
       setIsLoading(false);
     }
@@ -997,25 +1305,56 @@ export default function Home() {
     }
   }
 
-  async function removeProduct(product: Product) {
+  function removeProduct(product: Product) {
+    setConfirmAction({
+      title: `Remove ${product.name}?`,
+      message: "It disappears from Point of sale and Inventory. Past orders that include it are kept.",
+      confirmLabel: "Remove product",
+      onConfirm: async () => {
+        const { error } = await createClient().from("products").update({ active: false }).eq("id", product.id);
+        if (error) throw error;
+        setProducts((current) => current.filter((item) => item.id !== product.id));
+        setCart((current) => {
+          const next = { ...current };
+          delete next[product.id];
+          return next;
+        });
+        setNotice(`${product.name} removed from inventory.`);
+        try {
+          await refreshWorkspace();
+        } catch (error) {
+          setNotice(`${product.name} was removed, but dashboard data could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+        }
+      },
+    });
+  }
+
+  async function resolveShortfalls(ids: string[]) {
+    if (!ids.length) return;
     try {
-      const supabase = createClient();
-      const { error } = await supabase.from("products").update({ active: false }).eq("id", product.id);
+      const { error } = await createClient()
+        .from("stock_shortfalls")
+        .update({ resolved_at: new Date().toISOString(), resolved_by: userId })
+        .in("id", ids);
       if (error) throw error;
-      setProducts((current) => current.filter((item) => item.id !== product.id));
-      setCart((current) => {
-        const next = { ...current };
-        delete next[product.id];
-        return next;
-      });
-      setNotice(`${product.name} removed from inventory.`);
-      try {
-        await refreshWorkspace();
-      } catch (error) {
-        setNotice(`${product.name} was removed, but dashboard data could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
-      }
+      setShortfalls((current) => current.filter((item) => !ids.includes(item.id)));
+      setNotice(`${ids.length === 1 ? "Product" : `${ids.length} products`} marked as recounted.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Unable to remove product.");
+      setNotice(productSaveError(error, "Unable to update the recount list."));
+    }
+  }
+
+  async function runConfirmAction() {
+    if (!confirmAction) return;
+    setIsLoading(true);
+    try {
+      await confirmAction.onConfirm();
+      setConfirmAction(null);
+    } catch (error) {
+      setNotice(productSaveError(error, "That action couldn’t be completed."));
+      setConfirmAction(null);
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -1174,16 +1513,44 @@ export default function Home() {
     }
   }
 
-  async function signOut() {
+  async function performSignOut() {
     const supabase = createClient();
-    const { error } = await supabase.auth.signOut();
+    // Local scope: signs out this device only, not the account everywhere.
+    const { error } = await supabase.auth.signOut({ scope: "local" });
     if (error) {
-      setNotice(`Unable to sign out: ${error.message}`);
+      if (!isNetworkError(error)) {
+        setNotice(`Unable to sign out: ${error.message}`);
+        return;
+      }
+      // Offline, Supabase can't be told; forget the session on this device.
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+      window.location.reload();
       return;
     }
     setSignedIn(false);
+    setUserId(null);
     setActivePage("pos");
     setCart({});
+    setCustomItems([]);
+  }
+
+  // Queued sales stay on this computer through a sign-out, but warn first:
+  // offline, nobody can sign back in until the connection returns.
+  function signOut() {
+    const unsynced = pendingOrders.filter((sale) => sale.employeeId === userId).length;
+    if (isOnline && unsynced === 0) {
+      void performSignOut();
+      return;
+    }
+    setConfirmAction({
+      title: isOnline ? "Sign out with unsynced sales?" : "Sign out while offline?",
+      message: [
+        unsynced ? `${unsynced} of your sale${unsynced === 1 ? " hasn’t" : "s haven’t"} synced yet. ${unsynced === 1 ? "It stays" : "They stay"} saved on this computer and will sync the next time you, or an admin, sign in here online.` : "",
+        isOnline ? "" : "Signing in needs an internet connection, so no one can sign back in until it’s back.",
+      ].filter(Boolean).join(" "),
+      confirmLabel: "Sign out anyway",
+      onConfirm: performSignOut,
+    });
   }
 
   async function updateAccountEmail(event: FormEvent<HTMLFormElement>) {
@@ -1268,32 +1635,32 @@ export default function Home() {
     }
     setIsLoading(true);
     try {
-      const response = await fetch("/api/admin/reset-sales-history", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirmation: salesResetConfirmation }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error ?? "Unable to reset sales history.");
-      if (!Number.isSafeInteger(result.deletedOrders) || result.deletedOrders < 0) {
-        throw new Error("Sales history was reset, but the server returned an invalid order count.");
+      const { data, error } = await createClient().rpc("reset_sales_history", { p_confirmation: salesResetConfirmation });
+      if (error) throw error;
+      const deletedOrders = Number(data);
+      if (!Number.isSafeInteger(deletedOrders) || deletedOrders < 0) {
+        throw new Error("Sales history was reset, but the database returned an invalid order count.");
       }
       setOrders([]);
       setDashboardStats((current) => current ? { ...current, sales_total: 0, orders_today: 0 } : current);
       setSalesResetConfirmation("");
-      setNotice(`${result.deletedOrders} sales order${result.deletedOrders === 1 ? "" : "s"} and their item history permanently deleted. Products, stock, employees, and stock movements were not changed.`);
+      setNotice(`${deletedOrders} sales order${deletedOrders === 1 ? "" : "s"} and their item history permanently deleted. Products, stock, employees, and stock movements were not changed.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Unable to reset sales history.");
+      setNotice(productSaveError(error, "Unable to reset sales history."));
     } finally {
       setIsLoading(false);
     }
   }
 
   async function loadEmployees() {
-    const response = await fetch("/api/admin/employees");
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error ?? "Unable to load employee accounts.");
-    setEmployees(data.employees);
+    const { data, error } = await createClient()
+      .from("profiles")
+      .select("id, email, full_name, role")
+      .eq("role", "employee")
+      .order("created_at", { ascending: false })
+      .returns<Employee[]>();
+    if (error) throw new Error(`Unable to load employee accounts: ${error.message}`);
+    setEmployees(data);
   }
 
   async function createEmployee(event: FormEvent<HTMLFormElement>) {
@@ -1301,20 +1668,15 @@ export default function Home() {
     setIsLoading(true);
     try {
       const formData = new FormData(event.currentTarget);
-      const response = await fetch("/api/admin/employees", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          fullName: formData.get("fullName"),
-          email: formData.get("email"),
-          password: formData.get("password"),
-        }),
+      const { employee } = await callPosAdmin<{ employee: Employee }>({
+        action: "create-employee",
+        fullName: String(formData.get("fullName") ?? ""),
+        email: String(formData.get("email") ?? ""),
+        password: String(formData.get("password") ?? ""),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Unable to create employee.");
-      setEmployees((current) => [data.employee, ...current]);
+      setEmployees((current) => [employee, ...current]);
       setShowAddEmployee(false);
-      setNotice(`Employee account created for ${data.employee.full_name}.`);
+      setNotice(`Employee account created for ${employee.full_name}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Unable to create employee.");
     } finally {
@@ -1322,19 +1684,37 @@ export default function Home() {
     }
   }
 
-  async function removeEmployee(employee: Employee) {
+  function removeEmployee(employee: Employee) {
+    setConfirmAction({
+      title: `Remove ${employee.full_name}?`,
+      message: `${employee.email} will no longer be able to sign in. Their past sales stay in your records.`,
+      confirmLabel: "Remove employee",
+      onConfirm: async () => {
+        await callPosAdmin({ action: "remove-employee", id: employee.id });
+        setEmployees((current) => current.filter((item) => item.id !== employee.id));
+        setNotice(`Employee account for ${employee.full_name} removed.`);
+      },
+    });
+  }
+
+  async function setEmployeePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!passwordEmployee) return;
+    const formData = new FormData(event.currentTarget);
+    const password = String(formData.get("password") ?? "");
+    if (password.length < 8 || password !== String(formData.get("confirmPassword") ?? "")) {
+      setNotice("Enter the same new password twice, using at least 8 characters.");
+      return;
+    }
+    setIsLoading(true);
     try {
-      const response = await fetch("/api/admin/employees", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: employee.id }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error ?? "Unable to remove employee.");
-      setEmployees((current) => current.filter((item) => item.id !== employee.id));
-      setNotice(`Employee account for ${employee.full_name} removed.`);
+      await callPosAdmin({ action: "set-employee-password", id: passwordEmployee.id, password });
+      setNotice(`New password set for ${passwordEmployee.full_name}. Share it with them securely.`);
+      setPasswordEmployee(null);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Unable to remove employee.");
+      setNotice(error instanceof Error ? error.message : "Unable to set the password.");
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -1405,6 +1785,7 @@ export default function Home() {
   if (!signedIn) {
     return (
       <main className="min-h-screen bg-[#f4f8ff] text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+        {!isOnline && <OfflineBanner />}
         <div className="grid min-h-screen lg:grid-cols-[1.05fr_0.95fr]">
           <section className="relative hidden overflow-hidden bg-[#1459d9] px-12 py-10 text-white lg:flex lg:flex-col lg:justify-between xl:px-20">
             <div className="absolute -right-28 -top-24 h-96 w-96 rounded-full border border-white/10" />
@@ -1442,68 +1823,52 @@ export default function Home() {
             <div className="w-full max-w-[420px]">
               <div className="mb-10 lg:hidden"><Brand /></div>
               <div className="mb-8">
-                <p className="mb-2 text-sm font-semibold text-blue-700">WELCOME BACK</p>
+                <p className="mb-2 text-sm font-semibold text-blue-700 dark:text-blue-400">WELCOME BACK</p>
                 <h2 className="text-3xl font-semibold tracking-tight">Sign in to your store</h2>
-                <p className="mt-2 text-sm leading-6 text-slate-500">Choose your workspace, then enter your details.</p>
+                <p className="mt-2 text-sm leading-6 text-slate-500">Enter your work email and password. Admins and employees sign in here.</p>
               </div>
 
-              <div className="mb-6 grid grid-cols-2 rounded-xl bg-slate-100 p-1">
-                {(["employee", "admin"] as const).map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    onClick={() => setRole(option)}
-                    disabled={isLoading}
-                    className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium capitalize transition ${
-                      role === option ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-800"
-                    }`}
-                  >
-                    {option === "employee" ? <UserRound size={16} /> : <ShieldCheck size={16} />}
-                    {option}
-                  </button>
-                ))}
-              </div>
+              {adminCreated && <div role="status" className="mb-5 flex items-start gap-2.5 rounded-xl border border-emerald-100 bg-emerald-50 p-3.5 text-xs leading-5 text-emerald-800"><Check size={16} className="mt-0.5 shrink-0" />Your admin account is ready. Sign in to set up your store.</div>}
 
               <form onSubmit={signIn} className="space-y-4">
-                <label className="block text-sm font-medium text-slate-700">
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
                   Work email
                   <input
                     required
+                    autoFocus
                     type="email"
                     name="email"
+                    autoComplete="username"
                     placeholder="you@yourstore.com"
-                    className="mt-2 h-12 w-full rounded-xl border border-slate-200 bg-white px-4 text-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                    className="mt-2 h-12 w-full rounded-xl border border-slate-200 bg-white px-4 text-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-blue-950"
                   />
                 </label>
-                <label className="block text-sm font-medium text-slate-700">
+                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">
                   Password
                   <input
                     required
-                    minLength={4}
                     type="password"
                     name="password"
+                    autoComplete="current-password"
                     placeholder="Enter your password"
-                    className="mt-2 h-12 w-full rounded-xl border border-slate-200 bg-white px-4 text-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100"
+                    className="mt-2 h-12 w-full rounded-xl border border-slate-200 bg-white px-4 text-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-blue-950"
                   />
                 </label>
-                <div className="flex items-center justify-between py-1 text-sm">
-                  <label className="flex items-center gap-2 text-slate-600">
-                    <input type="checkbox" className="h-4 w-4 rounded border-slate-300 accent-blue-600" />
-                    Remember me
-                  </label>
-                  <a href="/auth/forgot-password" className="font-medium text-blue-700 hover:text-blue-800">Forgot password?</a>
-                </div>
+                <details className="text-xs text-slate-500">
+                  <summary className="cursor-pointer font-medium text-blue-700 hover:text-blue-800 dark:text-blue-300">Forgot your password?</summary>
+                  <p className="mt-2 leading-5">Ask your store administrator to set a new one from Employees → Set password. Administrators can reset their own password in the Supabase dashboard (Authentication → Users).</p>
+                </details>
                 {authError && <p role="alert" className="text-sm text-red-600">{authError}</p>}
                 <button disabled={isLoading} type="submit" className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 disabled:opacity-60">
-                  {isLoading ? "Signing in…" : <>Sign in as {role} <ArrowRight size={17} /><Kbd>Enter</Kbd></>}
+                  {isLoading ? "Signing in…" : <>Sign in <ArrowRight size={17} /><Kbd>Enter</Kbd></>}
                 </button>
               </form>
 
-              <div className="mt-6 flex items-start gap-2.5 rounded-xl border border-blue-100 bg-blue-50 p-3.5 text-xs leading-5 text-blue-800">
+              <div className="mt-6 flex items-start gap-2.5 rounded-xl border border-blue-100 bg-blue-50 p-3.5 text-xs leading-5 text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200">
                 <ShieldCheck size={16} className="mt-0.5 shrink-0" />
-                <span>Accounts are managed securely with Supabase. An administrator can create employee accounts from the dashboard.</span>
+                <span>You stay signed in on this computer until you sign out. Administrators create employee accounts from Employees.</span>
               </div>
-              <p className="mt-5 text-center text-sm text-slate-500">Setting up a new store? <Link href="/setup-admin" className="font-semibold text-blue-700 hover:text-blue-800">Create the first admin</Link></p>
+              <p className="mt-5 text-center text-sm text-slate-500">Setting up a new store? <Link href="/setup-admin" className="font-semibold text-blue-700 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">Create the first admin</Link></p>
               <p className="mt-8 text-center text-xs text-slate-400">Secure checkout starts here · Clover &amp; Co.</p>
             </div>
           </section>
@@ -1520,6 +1885,7 @@ export default function Home() {
       <div className="flex min-h-screen">
         <div className="min-w-0 flex-1">
           <header className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
+            {!connected && <OfflineBanner signedIn waiting={waitingToSync} />}
             <div className="flex h-[72px] items-center gap-3 px-4 sm:px-7 xl:px-9">
             <div className="shrink-0 xl:hidden"><Brand compact /></div>
             <div className="hidden shrink-0 xl:block"><Brand /></div>
@@ -1533,6 +1899,7 @@ export default function Home() {
                 <Clock3 size={14} className="text-slate-400" />
                 {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
               </div>
+              <SyncStatusButton isOnline={connected} isSyncing={isSyncing} waiting={waitingToSync} failed={failedToSync} onClick={() => setShowSyncPanel(true)} />
               <div className="relative">
                 <button type="button" aria-label="Notifications" aria-expanded={showNotifications} onClick={() => setShowNotifications((current) => !current)} className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800">
                   <Bell size={19} />
@@ -1566,8 +1933,8 @@ export default function Home() {
 
           <div className="p-4 sm:p-7 xl:p-9">
             {notice && (
-              <div role="status" className={`mb-5 flex items-center justify-between rounded-xl border px-4 py-3 text-sm ${notice.includes("successfully") || notice.includes("added") ? "border-emerald-100 bg-emerald-50 text-emerald-800" : "border-blue-100 bg-blue-50 text-blue-800"}`}>
-                <span className="flex items-center gap-2"><Check size={16} />{notice}</span>
+              <div role="status" className={`mb-5 flex items-center justify-between rounded-xl border px-4 py-3 text-sm ${noticeIsSuccess ? "border-emerald-100 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-200" : "border-blue-100 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-200"}`}>
+                <span className="flex items-center gap-2">{noticeIsSuccess ? <Check size={16} className="shrink-0" /> : <Info size={16} className="shrink-0" />}{notice}</span>
                 <button type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={16} /></button>
               </div>
             )}
@@ -1616,7 +1983,7 @@ export default function Home() {
               <AdminOverview
                 stats={dashboardStats}
                 products={products}
-                orders={orders}
+                orders={displayOrders}
                 salesChart={salesChart}
                 period={salesPeriod}
                 lastRefreshedAt={lastRefreshedAt}
@@ -1632,6 +1999,7 @@ export default function Home() {
                 employees={employees}
                 onAdd={() => setShowAddEmployee(true)}
                 onRemove={removeEmployee}
+                onSetPassword={setPasswordEmployee}
               />
             ) : currentView === "account" ? (
               <AccountView
@@ -1649,6 +2017,8 @@ export default function Home() {
             ) : currentView === "inventory" && isAdmin ? (
               <InventoryView
                 products={products}
+                shortfalls={shortfalls}
+                onResolveShortfalls={(ids) => void resolveShortfalls(ids)}
                 onAdd={() => { setSelectedProductIcon("auto"); setSelectedProductImage(null); setShowAddProduct(true); }}
                 onEditPrices={setEditingProductPrices}
                 onEditImage={(product) => {
@@ -1662,7 +2032,7 @@ export default function Home() {
                 onRestock={setRestockProduct}
               />
             ) : currentView === "orders" ? (
-              <OrdersView orders={orders} />
+              <OrdersView orders={displayOrders} />
             ) : currentView === "shifts" ? (
               <ShiftHistoryView isAdmin={isAdmin} />
             ) : (
@@ -1753,7 +2123,7 @@ export default function Home() {
                 {showMobileCart && <div aria-hidden="true" onClick={() => setShowMobileCart(false)} className="fixed inset-0 z-40 bg-slate-950/40 md:hidden" />}
                 <div
                   id="cart-panel"
-                  className={`fixed inset-y-0 right-0 z-50 w-[min(380px,88vw)] transition-[transform,visibility] duration-200 md:visible md:sticky md:bottom-auto md:right-auto md:top-[88px] md:z-auto md:h-[calc(100dvh-104px)] md:w-auto md:translate-x-0 md:transition-none ${showMobileCart ? "visible translate-x-0" : "invisible translate-x-full"}`}
+                  className={`fixed inset-y-0 right-0 z-50 w-[min(380px,88vw)] transition-[transform,visibility] duration-200 md:visible md:sticky md:bottom-auto md:right-auto md:z-auto ${connected ? "md:top-[88px] md:h-[calc(100dvh-104px)]" : "md:top-[120px] md:h-[calc(100dvh-136px)]"} md:w-auto md:translate-x-0 md:transition-none ${showMobileCart ? "visible translate-x-0" : "invisible translate-x-full"}`}
                 >
                   <CartPanel
                     items={cartItems}
@@ -1784,7 +2154,7 @@ export default function Home() {
               </div>
             )}
           </div>
-          <footer className="px-4 pb-6 text-center text-[10px] text-slate-400 sm:px-7 xl:px-9">Clover &amp; Co. POS · Front-end preview</footer>
+          <footer className="px-4 pb-6 text-center text-[10px] text-slate-400 sm:px-7 xl:px-9">Clover &amp; Co. POS</footer>
         </div>
       </div>
 
@@ -1900,6 +2270,20 @@ export default function Home() {
         </div>
       )}
       {quickAdd && <QuickAddDialog initial={quickAdd} onAdd={addCustomItem} onClose={() => setQuickAdd(null)} />}
+      {showSyncPanel && <SyncPanel sales={pendingOrders} isOnline={isOnline} isSyncing={isSyncing} currentUserId={userId} isAdmin={isAdmin} onSync={(retryFailed) => void syncPendingOrders({ retryFailed })} onClose={() => setShowSyncPanel(false)} />}
+      {confirmAction && <ConfirmDialog action={confirmAction} isWorking={isLoading} onConfirm={() => void runConfirmAction()} onCancel={() => setConfirmAction(null)} />}
+      {passwordEmployee && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) setPasswordEmployee(null); }}>
+          <div role="dialog" aria-modal="true" aria-labelledby="set-password-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
+            <div className="mb-5 flex items-start justify-between"><div><p className="text-xs font-semibold text-blue-600">TEAM ACCESS</p><h2 id="set-password-title" className="mt-1 text-xl font-semibold">Set a new password</h2><p className="mt-1 text-sm text-slate-500">{passwordEmployee.full_name} · {passwordEmployee.email}</p></div><button type="button" aria-label="Close dialog" disabled={isLoading} onClick={() => setPasswordEmployee(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50 dark:hover:bg-slate-800"><X size={18} /></button></div>
+            <form onSubmit={setEmployeePassword} className="space-y-4">
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">New password<input required autoFocus minLength={8} maxLength={72} type="password" name="password" autoComplete="new-password" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
+              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Confirm new password<input required minLength={8} maxLength={72} type="password" name="confirmPassword" autoComplete="new-password" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /><span className="mt-1 block text-xs font-normal text-slate-400">They’ll use it at their next sign-in. Sessions already open stay signed in.</span></label>
+              <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={() => setPasswordEmployee(null)} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700">Cancel <Kbd>Esc</Kbd></button><button type="submit" disabled={isLoading} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : <>Set password <Kbd>Enter</Kbd></>}</button></div>
+            </form>
+          </div>
+        </div>
+      )}
       {showImport && isAdmin && <ImportProductsDialog prepare={prepareImport} onImport={(preview) => void importProducts(preview)} onClose={() => setShowImport(false)} isImporting={isImporting} />}
       {restockProduct && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) setRestockProduct(null); }}>
@@ -2116,6 +2500,10 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
             <p className="mt-2 text-xs leading-5 text-slate-500">Admins open Inventory and use the ⋮ Actions menu on a product to restock it or add or change its image. Images are optional — when adding a product you can skip the image and an icon is chosen automatically.</p>
           </details>
           <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">What happens when the internet goes down?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Keep selling. If you were signed in, checkout keeps working with the products last loaded on this computer. Each sale is saved on this computer and syncs to the store database automatically when the connection returns; the cloud icon in the top bar shows how many are waiting. A sale is never recorded twice. Signing in, inventory and employee changes, and reports need a connection. If offline sales sold more than the recorded stock, admins see a “Recount needed” list in Inventory.</p>
+          </details>
+          <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I sell something that isn’t in my products?</summary>
             <p className="mt-2 text-xs leading-5 text-slate-500">Scan or type it and press Enter — if it isn’t found, the Quick add window opens. You can also press F3 or click Quick add. Enter a description, quantity, and either the price each or the total amount. Custom items don’t change stock and have no recorded cost, so orders containing them are left out of the estimated-profit figures.</p>
           </details>
@@ -2175,9 +2563,12 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
 }
 
 function ProductArtwork({ product, className = "" }: { product: Product; className?: string }) {
+  // Photos are stored online; offline (or if one fails to load) the product's
+  // icon is shown instead of a broken image.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   return (
     <div className={`relative grid shrink-0 place-items-center overflow-hidden ${product.color} ${className}`}>
-      {product.imageUrl ? (
+      {product.imageUrl && failedUrl !== product.imageUrl ? (
         <Image
           src={product.imageUrl}
           alt={product.name}
@@ -2185,10 +2576,130 @@ function ProductArtwork({ product, className = "" }: { product: Product; classNa
           unoptimized
           sizes="(max-width: 640px) 45vw, 220px"
           className="object-cover"
+          onError={() => setFailedUrl(product.imageUrl)}
         />
       ) : (
         <span aria-hidden="true">{product.emoji}</span>
       )}
+    </div>
+  );
+}
+
+// One line in the page flow (not overlaid), so nothing underneath is hidden.
+function OfflineBanner({ signedIn = false, waiting = 0 }: { signedIn?: boolean; waiting?: number }) {
+  const message = signedIn
+    ? `Offline mode: keep selling. Sales are saved on this computer${waiting ? ` (${waiting} waiting)` : ""} and sync automatically when you’re back online. Inventory, employee and report changes need a connection.`
+    : "You’re offline. Signing in needs an internet connection.";
+  return (
+    <div role="alert" title={message} className="flex h-8 items-center justify-center gap-2 bg-amber-500 px-4 text-xs font-semibold text-amber-950">
+      <WifiOff size={14} className="shrink-0" />
+      <span className="truncate">{message}</span>
+    </div>
+  );
+}
+
+// Header indicator for the offline queue; opens the sync panel.
+function SyncStatusButton({ isOnline, isSyncing, waiting, failed, onClick }: { isOnline: boolean; isSyncing: boolean; waiting: number; failed: number; onClick: () => void }) {
+  const label = failed
+    ? `${failed} sale${failed === 1 ? "" : "s"} couldn’t sync`
+    : isSyncing
+      ? "Syncing sales…"
+      : waiting
+        ? `${waiting} sale${waiting === 1 ? "" : "s"} waiting to sync`
+        : isOnline ? "All sales synced" : "Offline";
+  const tone = failed
+    ? "text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40"
+    : waiting || isSyncing
+      ? "text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/40"
+      : isOnline ? "text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40" : "text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800";
+  const Icon = !isOnline ? CloudOff : waiting || failed || isSyncing ? CloudUpload : Cloud;
+  return (
+    <button type="button" onClick={onClick} aria-label={`Sync status: ${label}`} title={label} className={`relative flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold transition ${tone}`}>
+      <Icon size={18} className={isSyncing ? "animate-pulse" : ""} />
+      {(waiting > 0 || failed > 0) && <span>{waiting + failed}</span>}
+    </button>
+  );
+}
+
+// Lists sales saved on this computer that haven't reached Supabase yet.
+function SyncPanel({ sales, isOnline, isSyncing, currentUserId, isAdmin, onSync, onClose }: {
+  sales: PendingOrder[];
+  isOnline: boolean;
+  isSyncing: boolean;
+  currentUserId: string | null;
+  isAdmin: boolean;
+  onSync: (retryFailed: boolean) => void;
+  onClose: () => void;
+}) {
+  const failed = sales.filter((sale) => sale.failed);
+  const otherCashiers = isAdmin ? 0 : sales.filter((sale) => sale.employeeId !== currentUserId).length;
+  const visible = sales.filter((sale) => isAdmin || sale.employeeId === currentUserId);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="sync-title" className="flex max-h-[85vh] w-full max-w-lg flex-col rounded-2xl bg-white shadow-2xl dark:bg-slate-900">
+        <div className="flex items-start justify-between border-b border-slate-100 p-6 pb-4 dark:border-slate-800">
+          <div>
+            <p className="text-xs font-semibold text-blue-600">OFFLINE SALES</p>
+            <h2 id="sync-title" className="mt-1 text-xl font-semibold">Sync status</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              {!isOnline ? "Offline. Sales below are saved on this computer and will sync automatically when the connection is back."
+                : visible.length ? "These sales are saved on this computer and haven’t reached the store database yet."
+                  : "Every sale from this computer has been synced."}
+            </p>
+          </div>
+          <button type="button" aria-label="Close sync status (Esc)" onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800"><X size={18} /></button>
+        </div>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-6 pt-4">
+          {failed.length > 0 && (
+            <div role="alert" className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-xs leading-5 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+              {failed.length} sale{failed.length === 1 ? " was" : "s were"} refused by the server and {failed.length === 1 ? "is" : "are"} kept here so nothing is lost. Check the reason below, fix it if possible (for example, an employee account that was removed needs an admin to sync), then retry.
+            </div>
+          )}
+          {otherCashiers > 0 && <p className="text-xs text-slate-500">{otherCashiers} sale{otherCashiers === 1 ? "" : "s"} from another cashier on this computer will sync when they or an admin sign in.</p>}
+          {visible.length > 0 ? (
+            <ul className="divide-y divide-slate-100 rounded-xl border border-slate-100 dark:divide-slate-800 dark:border-slate-800">
+              {visible.map((sale) => (
+                <li key={sale.clientOrderId} className="px-4 py-3 text-xs">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-semibold"><span className="font-mono">#{sale.clientOrderId.slice(0, 8)}</span> · {money(sale.total)}</p>
+                      <p className="mt-0.5 text-[11px] text-slate-400">{new Date(sale.createdAt).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Manila" })} · {sale.employeeName} · {sale.items.reduce((sum, item) => sum + item.quantity, 0)} items</p>
+                    </div>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${sale.failed ? "bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300"}`}>{sale.failed ? "Failed" : "Waiting"}</span>
+                  </div>
+                  {sale.lastError && <p className="mt-1.5 text-[11px] text-red-600 dark:text-red-300">{sale.lastError}</p>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="grid place-items-center py-8 text-center text-sm text-slate-400"><Cloud size={24} className="mb-2 text-emerald-500" />Nothing waiting to sync.</div>
+          )}
+        </div>
+        <div className="flex gap-3 border-t border-slate-100 p-6 pt-4 dark:border-slate-800">
+          <button type="button" onClick={onClose} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300">Close <Kbd>Esc</Kbd></button>
+          <button type="button" disabled={!isOnline || isSyncing || visible.length === 0} onClick={() => onSync(failed.length > 0)} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">
+            <RefreshCw size={15} className={isSyncing ? "animate-spin" : ""} />{isSyncing ? "Syncing…" : !isOnline ? "Waiting for connection" : failed.length ? "Retry all" : "Sync now"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Confirmation for destructive actions. Cancel has focus first, so a stray
+// Enter never deletes anything; Esc cancels.
+function ConfirmDialog({ action, isWorking, onConfirm, onCancel }: { action: ConfirmAction; isWorking: boolean; onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isWorking) onCancel(); }}>
+      <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
+        <div className="mb-4 grid h-10 w-10 place-items-center rounded-xl bg-red-50 text-red-600 dark:bg-red-950/50 dark:text-red-300"><TriangleAlert size={18} /></div>
+        <h2 id="confirm-title" className="text-lg font-semibold">{action.title}</h2>
+        <p id="confirm-message" className="mt-1.5 text-sm leading-6 text-slate-500">{action.message}</p>
+        <div className="mt-6 flex gap-3">
+          <button type="button" autoFocus disabled={isWorking} onClick={onCancel} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel <Kbd>Esc</Kbd></button>
+          <button type="button" disabled={isWorking} onClick={onConfirm} className="flex h-11 flex-1 items-center justify-center rounded-lg bg-red-600 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60">{isWorking ? "Working…" : action.confirmLabel}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2659,7 +3170,7 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
         {count > 0 && <button type="button" onClick={onClear} aria-keyshortcuts="F9" className="ml-auto flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-red-500">Clear all <Kbd>F9</Kbd></button>}
         <button type="button" aria-label="Close order panel" onClick={onClose} className="-mr-2 rounded-lg p-2 text-slate-400 hover:bg-slate-50 md:hidden"><X size={18} /></button>
       </div>
-      <div className="flex shrink-0 items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px] dark:bg-slate-800/60"><span className="text-slate-500">Customer</span><button type="button" className="flex items-center gap-1 font-semibold text-blue-700">Walk-in customer <ChevronDown size={13} /></button></div>
+      <div className="flex shrink-0 items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px] dark:bg-slate-800/60"><span className="text-slate-500">Customer</span><span className="font-semibold text-slate-700 dark:text-slate-200">Walk-in customer</span></div>
       <div className="min-h-[120px] flex-1 overflow-y-auto px-5">
         {items.length + customItems.length > 0 ? <ul className="divide-y divide-slate-100 dark:divide-slate-800">{items.map((product) => <li key={product.id} className={`flex items-center gap-3 ${showImages ? "py-4" : "py-3"}`}>
           {showImages && <ProductArtwork product={product} className="h-11 w-11 rounded-xl text-xl" />}
@@ -2680,8 +3191,10 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
   );
 }
 
-function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, onImport, onRestock }: {
+function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEditPrices, onEditImage, onRemove, onImport, onRestock }: {
   products: Product[];
+  shortfalls: StockShortfall[];
+  onResolveShortfalls: (ids: string[]) => void;
   onAdd: () => void;
   onEditPrices: (product: Product) => void;
   onEditImage: (product: Product) => void;
@@ -2707,6 +3220,22 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
           <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><PackagePlus size={16} /> Add product</button>
         </div>
       </div>
+      {shortfalls.length > 0 && (
+        <div role="alert" className="mb-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5"><TriangleAlert size={16} className="mt-0.5 shrink-0" /><div><p className="text-sm font-semibold">Recount needed</p><p className="mt-0.5 leading-5">Sales made offline sold more than the recorded stock, so these products were set to 0. Count them, restock to the real amount, then mark them recounted.</p></div></div>
+            <button type="button" onClick={() => onResolveShortfalls(shortfalls.map((item) => item.id))} className="h-8 shrink-0 rounded-lg bg-amber-600 px-3 font-semibold text-white hover:bg-amber-700">Mark all recounted</button>
+          </div>
+          <ul className="mt-3 divide-y divide-amber-200/70 rounded-xl bg-white/70 dark:divide-amber-900 dark:bg-slate-900/50">
+            {shortfalls.map((item) => (
+              <li key={item.id} className="flex items-center justify-between gap-3 px-3 py-2">
+                <span><b className="font-semibold">{item.productName}</b>: {item.shortfall} more sold than recorded <span className="text-amber-700/80 dark:text-amber-200/70">· {item.createdAt.toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Manila" })}</span></span>
+                <button type="button" onClick={() => onResolveShortfalls([item.id])} className="shrink-0 font-semibold text-amber-800 hover:underline dark:text-amber-200">Recounted</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <p className="mb-4 text-xs text-slate-400">Import an Excel (.xlsx), CSV, or JSON file with Product Name, Category, Retail Price and Stock columns, plus optional Wholesale Price, Cost Price and Barcode. Use Import products to download the Excel template and preview changes before saving.</p>
       <div className="mb-5 grid gap-3 sm:grid-cols-3">
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Total products</p><p className="mt-2 text-2xl font-semibold">{products.length}</p></div>
@@ -2734,10 +3263,11 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
   );
 }
 
-function EmployeeView({ employees, onAdd, onRemove }: {
+function EmployeeView({ employees, onAdd, onRemove, onSetPassword }: {
   employees: Employee[];
   onAdd: () => void;
   onRemove: (employee: Employee) => void;
+  onSetPassword: (employee: Employee) => void;
 }) {
   return (
     <section>
@@ -2747,9 +3277,9 @@ function EmployeeView({ employees, onAdd, onRemove }: {
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Employee accounts</h2><p className="mt-1 text-xs text-slate-400">{employees.length} active employee{employees.length === 1 ? "" : "s"}</p></div><Users size={18} className="text-slate-400" /></div>
-        {employees.length > 0 ? <div className="divide-y divide-slate-100">{employees.map((employee) => <div key={employee.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-blue-50 text-sm font-bold text-blue-700">{employee.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div><div className="min-w-0"><p className="truncate text-sm font-semibold">{employee.full_name}</p><p className="mt-1 truncate text-xs text-slate-400">{employee.email}</p></div></div><div className="flex items-center gap-3"><span className="hidden rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700 sm:inline">Employee</span><button type="button" aria-label={`Remove ${employee.full_name}`} onClick={() => onRemove(employee)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></div>)}</div> : <div className="grid min-h-48 place-items-center text-center"><div><Users size={26} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No employees yet</p><p className="mt-1 text-xs text-slate-400">Create accounts for the people on your team.</p></div></div>}
+        {employees.length > 0 ? <div className="divide-y divide-slate-100">{employees.map((employee) => <div key={employee.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-blue-50 text-sm font-bold text-blue-700">{employee.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div><div className="min-w-0"><p className="truncate text-sm font-semibold">{employee.full_name}</p><p className="mt-1 truncate text-xs text-slate-400">{employee.email}</p></div></div><div className="flex items-center gap-3"><span className="hidden rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700 sm:inline">Employee</span><button type="button" onClick={() => onSetPassword(employee)} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 text-xs font-semibold text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-800"><KeyRound size={14} /> Set password</button><button type="button" aria-label={`Remove ${employee.full_name}`} title="Remove employee" onClick={() => onRemove(employee)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></div>)}</div> : <div className="grid min-h-48 place-items-center text-center"><div><Users size={26} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No employees yet</p><p className="mt-1 text-xs text-slate-400">Create accounts for the people on your team.</p></div></div>}
       </div>
-      <p className="mt-4 text-xs text-slate-400">Employee passwords are created by admins and should be shared securely. Employee accounts cannot access inventory or team settings.</p>
+      <p className="mt-4 text-xs text-slate-400">Admins create employee passwords and can set a new one any time with Set password. Share passwords securely. Employee accounts cannot access inventory or team settings.</p>
     </section>
   );
 }
@@ -2811,6 +3341,16 @@ function AccountView({
 }
 
 
+function OrderStatusBadge({ order }: { order: Order }) {
+  if (order.syncStatus === "failed") {
+    return <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2.5 py-1 text-[10px] font-semibold text-red-700 dark:bg-red-950 dark:text-red-300"><TriangleAlert size={11} /> Sync failed</span>;
+  }
+  if (order.syncStatus === "pending") {
+    return <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-semibold text-amber-700 dark:bg-amber-950 dark:text-amber-300"><CloudUpload size={11} /> Pending sync</span>;
+  }
+  return <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"><Check size={11} /> Completed</span>;
+}
+
 const orderDateTime = (date: Date) => ({
   date: date.toLocaleDateString("en-PH", { month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Manila" }),
   time: date.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
@@ -2853,7 +3393,7 @@ function OrdersView({ orders }: { orders: Order[] }) {
                   const { date, time } = orderDateTime(order.createdAt);
                   return (
                     <tr key={order.fullId} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
-                      <td className="px-5 py-3.5"><span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"><Check size={11} /> Completed</span><p className="mt-1.5 font-mono text-[10px] text-slate-400">{order.id}</p></td>
+                      <td className="px-5 py-3.5"><OrderStatusBadge order={order} /><p className="mt-1.5 font-mono text-[10px] text-slate-400">{order.id}</p></td>
                       <td className="px-4 py-3.5"><p className="font-medium text-slate-700 dark:text-slate-200">{date}</p><p className="mt-0.5 text-[11px] text-slate-400">{time}</p></td>
                       <td className="px-4 py-3.5 font-medium text-slate-700 dark:text-slate-200">{order.employeeName}</td>
                       <td className="px-4 py-3.5"><p className="font-medium text-slate-700 dark:text-slate-200">{paymentMethodLabel(order.paymentMethod)}{order.isWholesale && <span className="ml-2 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Wholesale</span>}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.paymentReferenceLast4 ? `Ref •••• ${order.paymentReferenceLast4}` : order.cashReceived !== null ? `Change ${money(order.changeDue ?? 0)}` : ""}</p></td>
@@ -2917,7 +3457,7 @@ function OrderDetailsDialog({ order, onClose }: { order: Order; onClose: () => v
           {order.cashReceived !== null && <div className="flex justify-between text-slate-500"><dt>Change</dt><dd className="font-medium text-slate-700 dark:text-slate-200">{money(order.changeDue ?? 0)}</dd></div>}
           <div className="flex items-center justify-between border-t border-dashed border-slate-200 pt-3 dark:border-slate-700"><dt className="text-sm font-semibold">Total</dt><dd className="text-lg font-bold">{money(order.total)}</dd></div>
         </dl>
-        <p className="mt-4 flex items-center gap-1.5 text-[11px] text-emerald-700"><Check size={13} /> Completed · {order.items} item{order.items === 1 ? "" : "s"}</p>
+        <div className="mt-4 flex items-center gap-2 text-[11px] text-slate-500"><OrderStatusBadge order={order} /> {order.items} item{order.items === 1 ? "" : "s"}</div>{order.syncStatus && <p className="mt-2 text-[11px] leading-4 text-slate-500">{order.syncStatus === "failed" && order.syncError ? `The server refused this sale: ${order.syncError}` : "Saved on this computer. It syncs to the store database automatically when online."}</p>}
       </div>
     </div>
   );

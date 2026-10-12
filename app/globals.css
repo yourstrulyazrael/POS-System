@@ -163,7 +163,6 @@ html.dark select {
     display: none !important;
   }
 
-  .analytics-report-print-mode > div > aside,
   .analytics-report-print-mode > div > div > header,
   .analytics-report-print-mode > div > nav[aria-label="Workspace navigation"],
   .analytics-report-print-mode footer {

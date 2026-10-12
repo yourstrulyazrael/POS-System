@@ -1,139 +1,86 @@
-<a href="https://demo-nextjs-with-supabase.vercel.app/">
-  <img alt="Next.js and Supabase Starter Kit - the fastest way to build apps with Next.js and Supabase" src="https://demo-nextjs-with-supabase.vercel.app/opengraph-image.png">
-  <h1 align="center">Next.js and Supabase Starter Kit</h1>
-</a>
+# Clover POS
 
-<p align="center">
- The fastest way to build apps with Next.js and Supabase
-</p>
+Point-of-sale desktop app for Clover & Co. — checkout with barcode scanning, inventory with Excel import/export, wholesale pricing, shifts, and sales reports.
 
-<p align="center">
-  <a href="#features"><strong>Features</strong></a> ·
-  <a href="#demo"><strong>Demo</strong></a> ·
-  <a href="#deploy-to-vercel"><strong>Deploy to Vercel</strong></a> ·
-  <a href="#clone-and-run-locally"><strong>Clone and run locally</strong></a> ·
-  <a href="#feedback-and-issues"><strong>Feedback and issues</strong></a>
-  <a href="#more-supabase-examples"><strong>More Examples</strong></a>
-</p>
-<br/>
+It's a Next.js app built as a **static export** and packaged with **Electron**. There is no app server: all data lives in **Supabase**, protected by row-level security, database functions, and one Edge Function (`pos-admin`) for account management. The installer contains only the public Supabase key. The app needs an internet connection to reach Supabase.
 
-## Features
+## 1. Set up Supabase (once)
 
-- Works across the entire [Next.js](https://nextjs.org) stack
-  - App Router
-  - Pages Router
-  - Proxy
-  - Client
-  - Server
-  - It just works!
-- supabase-ssr. A package to configure Supabase Auth to use cookies
-- Password-based authentication block installed via the [Supabase UI Library](https://supabase.com/ui/docs/nextjs/password-based-auth)
-- Styling with [Tailwind CSS](https://tailwindcss.com)
-- Components with [shadcn/ui](https://ui.shadcn.com/)
-- Optional deployment with [Supabase Vercel Integration and Vercel deploy](#deploy-your-own)
-  - Environment variables automatically assigned to Vercel project
+Install the [Supabase CLI](https://supabase.com/docs/guides/cli), then from this folder:
 
-## Demo
+```bash
+supabase login
+supabase link --project-ref <your-project-ref>
 
-You can view a fully working demo at [demo-nextjs-with-supabase.vercel.app](https://demo-nextjs-with-supabase.vercel.app/).
+# Database: tables, policies and functions (supabase/migrations)
+supabase db push
 
-## Deploy to Vercel
+# Edge Function for creating/removing employees, setting their passwords,
+# and the one-time first-admin setup
+supabase functions deploy pos-admin --no-verify-jwt
+supabase secrets set POS_SETUP_SECRET=<a long random value>
+```
 
-Vercel deployment will guide you through creating a Supabase account and project.
+`--no-verify-jwt` is required: the function checks the signed-in user itself, because the app uses a publishable key (not a JWT) and first-admin setup runs before anyone can sign in.
 
-After installation of the Supabase integration, all relevant environment variables will be assigned to the project so the deployment is fully functioning.
+## 2. Configure the app
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvercel%2Fnext.js%2Ftree%2Fcanary%2Fexamples%2Fwith-supabase&project-name=nextjs-with-supabase&repository-name=nextjs-with-supabase&demo-title=nextjs-with-supabase&demo-description=This+starter+configures+Supabase+Auth+to+use+cookies%2C+making+the+user%27s+session+available+throughout+the+entire+Next.js+app+-+Client+Components%2C+Server+Components%2C+Route+Handlers%2C+Server+Actions+and+Middleware.&demo-url=https%3A%2F%2Fdemo-nextjs-with-supabase.vercel.app%2F&external-id=https%3A%2F%2Fgithub.com%2Fvercel%2Fnext.js%2Ftree%2Fcanary%2Fexamples%2Fwith-supabase&demo-image=https%3A%2F%2Fdemo-nextjs-with-supabase.vercel.app%2Fopengraph-image.png)
+Create `.env.local` with the **public** values only (Supabase dashboard → Project Settings → API):
 
-The above will also clone the Starter kit to your GitHub, you can clone that locally and develop locally.
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+```
 
-If you wish to just develop locally and not deploy to Vercel, [follow the steps below](#clone-and-run-locally).
+These are compiled into the app. Never put the service-role / secret key in `.env.local`: the app doesn't use it, and anything there could end up in a build.
 
-## Clone and run locally
+## 3. Develop
 
-1. You'll first need a Supabase project which can be made [via the Supabase dashboard](https://database.new)
+```bash
+npm install
+npx install-electron     # downloads the Electron runtime (first time only)
+npm run dev              # web UI at http://localhost:3000
+npm run desktop:dev      # Electron window pointed at the dev server (run alongside npm run dev)
+npm run desktop          # build the static export and open it in Electron
+npm run lint
+```
 
-2. Create a Next.js app using the Supabase Starter template npx command
+> Running from VS Code's terminal? It sets `ELECTRON_RUN_AS_NODE=1`, which makes Electron behave like plain Node. Clear it first (PowerShell: `Remove-Item Env:ELECTRON_RUN_AS_NODE`; bash: `unset ELECTRON_RUN_AS_NODE`).
 
-   ```bash
-   npx create-next-app --example with-supabase with-supabase-app
-   ```
+## 4. Build the Windows installer
 
-   ```bash
-   yarn create next-app --example with-supabase with-supabase-app
-   ```
+```bash
+npm run dist:win
+```
 
-   ```bash
-   pnpm create next-app --example with-supabase with-supabase-app
-   ```
+Output: `dist-desktop/Clover POS Setup <version>.exe` (≈115 MB, mostly the Electron runtime). Bump `version` in `package.json` for each release. The installer is unsigned, so Windows SmartScreen will warn on first run; configure a code-signing certificate in electron-builder to remove the warning.
 
-3. Use `cd` to change into the app's directory
+## 5. First run
 
-   ```bash
-   cd with-supabase-app
-   ```
+1. Open the app → **Create the first admin**, and enter the `POS_SETUP_SECRET` value. Setup closes once an admin exists.
+2. Sign in, then add products (Inventory → **Import products** accepts the Excel template) and employees (Employees → **Add employee**).
+3. Forgotten employee passwords: Employees → **Set password**. A forgotten admin password: Supabase dashboard → Authentication → Users.
 
-4. Rename `.env.example` to `.env.local` and update the following:
+## Offline mode
 
-  ```env
-  NEXT_PUBLIC_SUPABASE_URL=[INSERT SUPABASE PROJECT URL]
-  NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=[INSERT SUPABASE PROJECT API PUBLISHABLE OR ANON KEY]
-  ```
-  > [!NOTE]
-  > This example uses `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, which refers to Supabase's new **publishable** key format.
-  > Both legacy **anon** keys and new **publishable** keys can be used with this variable name during the transition period. Supabase's dashboard may show `NEXT_PUBLIC_SUPABASE_ANON_KEY`; its value can be used in this example.
-  > See the [full announcement](https://github.com/orgs/supabase/discussions/29260) for more information.
+If the connection drops, a cashier who is already signed in can keep selling:
 
-  Both `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` can be found in [your Supabase project's API settings](https://supabase.com/dashboard/project/_?showConnect=true)
+- The POS opens from the products, orders and profile last loaded on this computer (cached in IndexedDB per user).
+- Each sale is written to disk (IndexedDB, strict durability) before the cart clears, then synced automatically when Supabase is reachable again — on reconnect, at sign-in, and every 30 s while sales are waiting. The cloud icon in the top bar shows the queue; click it for details or **Sync now**.
+- Every sale carries a one-time id (`orders.client_order_id`), so a retry after a dropped connection or a repeated sync is never recorded twice. A sale leaves the queue only after Supabase confirms it; a sale the server refuses is kept and marked failed, never deleted.
+- Synced sales keep their original time, cashier and the prices actually charged. If offline sales sold more than the recorded stock, stock stops at 0 and the product appears under **Recount needed** in Inventory (`stock_shortfalls`).
+- Online-only: signing in, inventory/employee/account changes, imports, analytics and shift reports.
 
-5. You can now run the Next.js local development server:
+## Project layout
 
-   ```bash
-   npm run dev
-   ```
-
-   The starter kit should now be running on [localhost:3000](http://localhost:3000/).
-
-6. This template comes with the default shadcn/ui style initialized. If you instead want other ui.shadcn styles, delete `components.json` and [re-install shadcn/ui](https://ui.shadcn.com/docs/installation/next)
-
-> Check out [the docs for Local Development](https://supabase.com/docs/guides/getting-started/local-development) to also run Supabase locally.
-
-## POS database and first admin
-
-This POS uses the Supabase project configured in `.env.local`.
-
-1. Apply all SQL migrations in `supabase/migrations` to your Supabase project, in filename order, using the Supabase SQL editor or Supabase CLI. They create the POS schema, role-based row-level security, atomic checkout, sari-sari starter products, audited stock adjustments, live admin reporting, and product image storage.
-2. Disable public email sign-ups in Supabase Auth settings so employees can only be created by admins.
-3. Add these server-only values to `.env.local`. Get the service-role key from your Supabase project's API settings. Generate `POS_SETUP_SECRET` as a random secret of at least 32 characters. Never expose or commit either value.
-
-   ```env
-   SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
-   POS_SETUP_SECRET=your_random_one_time_setup_key
-   ```
-
-4. Restart the development server, open `/setup-admin`, and create the first administrator using the setup key. The setup endpoint refuses to assign another first admin once one exists.
-5. Sign in as that admin. Use **Employees** to create staff login accounts; admins can manage the product catalog and import product files. Employee access is constrained by database policies, not just hidden UI.
-
-Product imports accept CSV headers `name,category,cost_price,wholesale_price,retail_price,stock` or a JSON array with those fields. Legacy imports can still use `price` instead of `retail_price`; omitted cost and wholesale prices default to zero. Add the optional `image_icon` field to select a preset icon (`auto`, `rice`, `canned`, `noodles`, `snacks`, `eggs`, `drink`, `coffee`, `condiments`, `personal-care`, `household`, `bread`, `candy`, `frozen`, or `medicine`). A matching product name updates the existing catalog record.
-
-The admin inventory records cost, wholesale, and retail prices; retail price is used for checkout. Existing products keep their retail price. Existing cost prices start as unknown until entered via the **Prices** action; reports do not treat unknown costs as zero. Product artwork can be auto-detected from its name/category, selected from the preset icon grid, or uploaded as a JPEG, PNG, or WebP image (up to 5 MB). Custom images are stored in the `product-images` Supabase Storage bucket.
-
-Checkout supports Cash, E-Wallet, and Card, and charges the product subtotal without VAT. Cash checkout records the amount received and change due; E-Wallet and Card checkout require the last four digits of the payment reference. Staff must verify electronic payments with their provider because the POS only stores reference digits and does not process or automatically verify payments. Existing historical orders are retained; prior cash orders are migrated as exact-payment transactions because their tendered amount was not recorded.
-
-For a database that has already applied earlier POS migrations, apply any newer migrations in filename order. The sari-sari catalog migration deactivates only the original demo items and keeps their order history intact; the admin tools migration adds restock auditing and PHP-oriented sales reports; the product images migration enables preset icons and admin-only image uploads; the payment migration stores payment method and reference digits with each order; the account tools migration disables VAT for new orders; and the account-name/reset migration synchronizes profile names and adds an atomic admin sales-history reset used by the server API.
-
-Migration `202610120005_sales_chart_employee.sql` adds payment sales charts and saves an employee-name snapshot with each new order so attribution remains available if an employee account is later removed. Migration `202610120006_product_prices_and_checkout.sql` adds cost and wholesale prices, expands payment methods, and records cash received, change due, and payment reference digits. Apply all pending migrations in filename order.
-
-The admin-only **Analytics & Reports** view is part of the main app navigation and provides revenue and estimated net profit for today, the last 7 days, or the last 30 days. Excel export downloads an Excel-compatible `.xls` workbook; PDF export opens the browser print dialog, where **Save as PDF** can be selected. Profit uses the cost price snapshotted on each sale and excludes operating expenses. Legacy orders without a cost snapshot are excluded from profit calculations and identified in the report. Apply `202610120007_profit_reports.sql` after the earlier migrations to enable the report and cost snapshots.
-
-The **Account** panel lets each signed-in user request an email change or set a new password. Admins can also permanently delete order and order-item history there; this does not reset products, stock, employee accounts, or stock movement history. Dark mode is available from the theme control and remembers the selected theme.
-
-## Feedback and issues
-
-Please file feedback and issues over on the [Supabase GitHub org](https://github.com/supabase/supabase/issues/new/choose).
-
-## More Supabase examples
-
-- [Next.js Subscription Payments Starter](https://github.com/vercel/nextjs-subscription-payments)
-- [Cookie-based Auth and the Next.js 13 App Router (free course)](https://youtube.com/playlist?list=PL5S4mPUpp4OtMhpnp93EFSo42iQ40XjbF)
-- [Supabase Auth and the Next.js App Router](https://github.com/supabase/supabase/tree/master/examples/auth/nextjs)
+| Path | What it is |
+|---|---|
+| `app/page.tsx` | The POS app (sign-in, POS, inventory, orders, shifts, reports, settings) |
+| `components/` | Analytics, shift history, chart, setup form, UI primitives |
+| `lib/supabase/client.ts` | Supabase client (session stored locally) and the `pos-admin` caller |
+| `lib/product-import.ts` | Excel/CSV/JSON import parsing and `.xlsx` template/export writing |
+| `lib/offline-store.ts` | IndexedDB queue of offline sales and the offline workspace cache |
+| `supabase/migrations/` | Database schema, row-level security and functions |
+| `supabase/functions/pos-admin/` | Edge Function for account management |
+| `electron/main.cjs` | Desktop shell: serves `out/` over `app://`, sandboxed window, CSP |
+| `build/icon.png` | App icon used for the installer |
