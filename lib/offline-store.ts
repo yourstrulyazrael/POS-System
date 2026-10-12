@@ -21,6 +21,7 @@ export type PendingOrder = {
   cashReceived: number | null;
   wholesale: boolean;
   total: number;
+  cashSessionId?: string | null; // drawer session the sale happened in
   attempts: number;
   lastError: string | null;
   // A permanent rejection (the server refused the data). Kept, never deleted,
