@@ -65,7 +65,7 @@ type Product = {
   emoji: string;
   color: string;
 };
-type Order = { id: string; items: number; total: number; time: string; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string };
+type Order = { id: string; items: number; total: number; time: string; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string; isWholesale: boolean };
 type SalesChartPoint = { label: string; cash: number; eWallet: number; card: number };
 type ProfitReportPoint = {
   label: string;
@@ -97,6 +97,7 @@ type OrderRow = {
   change_due: number | string | null;
   employee_name: string;
   employee_id?: string | null;
+  is_wholesale: boolean;
 };
 type Employee = { id: string; email: string; full_name: string; role: "employee" };
 type DashboardStats = { sales_total: number; orders_today: number; active_products: number; units_in_stock: number; active_employees: number };
@@ -180,7 +181,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
     supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url, barcode").eq("active", true).order("name").returns<ProductRow[]>(),
-    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
+    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
   if (ordersResult.error) throw new Error(`Unable to load orders: ${ordersResult.error.message}`);
@@ -240,6 +241,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       cashReceived: order.cash_received === null ? null : Number(order.cash_received),
       changeDue: order.change_due === null ? null : Number(order.change_due),
       employeeName: order.employee_name || "Former employee",
+      isWholesale: order.is_wholesale,
     })),
     stats,
     salesChart,
@@ -401,6 +403,7 @@ export default function Home() {
   const [showHelpCenter, setShowHelpCenter] = useState(false);
   const [showCheckoutDialog, setShowCheckoutDialog] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
+  const [wholesaleMode, setWholesaleMode] = useState(false);
   const [cashReceived, setCashReceived] = useState("");
   const [paymentReferenceLast4, setPaymentReferenceLast4] = useState("");
   const [accountEmail, setAccountEmail] = useState("");
@@ -431,8 +434,14 @@ export default function Home() {
   );
   const cartItems = products.filter((product) => cart[product.id]);
   const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0);
-  const subtotal = cartItems.reduce((total, product) => total + product.price * cart[product.id], 0);
+  // Wholesale mode charges each product's wholesale price; products without
+  // one (₱0) stay at retail. place_order applies the same rule server-side.
+  const unitPrice = (product: Product) => (wholesaleMode && product.wholesalePrice > 0 ? product.wholesalePrice : product.price);
+  const subtotal = cartItems.reduce((total, product) => total + unitPrice(product) * cart[product.id], 0);
   const total = Math.round(subtotal * 100) / 100;
+  const retailTotal = Math.round(cartItems.reduce((sum, product) => sum + product.price * cart[product.id], 0) * 100) / 100;
+  const wholesaleSavings = Math.round((retailTotal - total) * 100) / 100;
+  const itemsWithoutWholesalePrice = cartItems.filter((product) => product.wholesalePrice <= 0);
   const notifications = [
     ...products
       .filter((product) => product.stock <= 5)
@@ -680,7 +689,7 @@ export default function Home() {
       if (itemCount && !isLoading) { setNotice(""); setShowCheckoutDialog(true); }
     } else if (event.key === "F9") {
       event.preventDefault();
-      if (itemCount) { setCart({}); setNotice("Order cleared."); }
+      if (itemCount) { setCart({}); setWholesaleMode(false); setNotice("Order cleared."); }
     } else if (!inTextField && !event.ctrlKey && !event.altKey && !event.metaKey && event.key.length === 1 && event.key !== " ") {
       // Type-to-search: typing or scanning anywhere on the POS starts a new
       // entry in the search box, where Enter adds the item.
@@ -694,6 +703,7 @@ export default function Home() {
     F1: () => choosePaymentMethod("cash"),
     F2: () => choosePaymentMethod("e_wallet"),
     F3: () => choosePaymentMethod("card"),
+    F4: () => setWholesaleMode((current) => !current),
   }, showCheckoutDialog && !showHelpCenter && !isLoading);
 
   // Auto-add: once the entry ("24/<barcode>" or a bare barcode) exactly matches
@@ -758,24 +768,33 @@ export default function Home() {
         p_payment_method: paymentMethod,
         p_payment_reference_last4: paymentMethod === "cash" ? null : paymentReferenceLast4,
         p_cash_received: receivedAmount,
+        // Only sent when on, so retail checkout keeps working on databases
+        // that haven't applied the wholesale migration yet.
+        ...(wholesaleMode ? { p_wholesale: true } : {}),
       }).single();
       if (error) throw error;
       if (!data || typeof data !== "object" || !("order_id" in data) || typeof data.order_id !== "string") {
         throw new Error("Checkout completed, but the order confirmation was invalid.");
       }
       const newOrderId = data.order_id.slice(0, 8);
+      const wasWholesale = wholesaleMode;
       setCart({});
       setShowCheckoutDialog(false);
       setCashReceived("");
       setPaymentReferenceLast4("");
-      setNotice(`Order #${newOrderId} placed successfully.`);
+      setWholesaleMode(false);
+      setNotice(`${wasWholesale ? "Wholesale order" : "Order"} #${newOrderId} placed successfully.`);
       try {
         await refreshWorkspace();
       } catch (error) {
         setNotice(`Order #${newOrderId} was placed, but the store data could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
       }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Unable to complete checkout.");
+      if (wholesaleMode && error && typeof error === "object" && "code" in error && (error.code === "PGRST202" || error.code === "42883")) {
+        setNotice("Wholesale checkout needs the database update. Apply migration 202610120009_wholesale_checkout.sql, then retry.");
+      } else {
+        setNotice(error instanceof Error ? error.message : error && typeof error === "object" && "message" in error ? String(error.message) : "Unable to complete checkout.");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -1621,7 +1640,10 @@ export default function Home() {
                   onChange={changeQuantity}
                   onCheckout={() => { setNotice(""); setShowCheckoutDialog(true); }}
                   isProcessing={isLoading}
-                  onClear={() => setCart({})}
+                  onClear={() => { setCart({}); setWholesaleMode(false); }}
+                  priceOf={unitPrice}
+                  wholesale={wholesaleMode}
+                  savings={wholesaleSavings}
                 />
               </div>
             )}
@@ -1650,6 +1672,16 @@ export default function Home() {
                 ))}
               </div>
             </fieldset>
+            <div className={`mt-4 rounded-xl border p-3 ${wholesaleMode ? "border-emerald-200 bg-emerald-50/70" : "border-slate-200"}`}>
+              <button type="button" role="switch" aria-checked={wholesaleMode} aria-keyshortcuts="F4" onClick={() => setWholesaleMode((current) => !current)} className="flex w-full items-center gap-3 text-left">
+                <span className={`relative h-5 w-9 shrink-0 rounded-full transition ${wholesaleMode ? "bg-emerald-600" : "bg-slate-300"}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${wholesaleMode ? "left-[18px]" : "left-0.5"}`} /></span>
+                <span className="flex-1"><span className="block text-sm font-semibold text-slate-700">Wholesale pricing</span><span className="block text-[11px] text-slate-500">{wholesaleMode ? `Saving ${money(wholesaleSavings)} off retail (${money(retailTotal)})` : "Charge this customer wholesale prices"}</span></span>
+                <Kbd className="text-slate-500">F4</Kbd>
+              </button>
+              {wholesaleMode && itemsWithoutWholesalePrice.length > 0 && (
+                <p className="mt-2 border-t border-emerald-200 pt-2 text-[11px] leading-4 text-amber-700">No wholesale price set — charged at retail: {itemsWithoutWholesalePrice.map((product) => product.name).join(", ")}</p>
+              )}
+            </div>
             {paymentMethod === "cash" ? (
               <div className="mt-4 space-y-3 rounded-xl bg-slate-50 p-4">
                 <label className="block text-sm font-medium text-slate-700">Cash received (₱)
@@ -1850,7 +1882,7 @@ function AdminOverview({
         </div>
         <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Recent sales</h2><p className="mt-1 text-xs text-slate-400">Latest completed transactions</p></div><button type="button" onClick={onViewOrders} className="text-xs font-semibold text-blue-600 hover:text-blue-700">All orders <ArrowRight size={13} className="ml-1 inline" /></button></div>
-          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName} · {paymentMethodLabel(order.paymentMethod)}</p></div><p className="text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
+          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName} · {paymentMethodLabel(order.paymentMethod)}{order.isWholesale ? " · Wholesale" : ""}</p></div><p className="text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
         </div>
       </div>
     </section>
@@ -1936,6 +1968,10 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
             <p className="mt-2 text-xs leading-5 text-slate-500">Admins can open Inventory to restock an item or use its Image action to upload or change its custom photo. New products can also be given a custom image when added.</p>
           </details>
           <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">How do I sell at wholesale prices?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">In the checkout dialog, turn on Wholesale pricing (or press F4). Each item is charged its wholesale price; items without one are charged retail and listed in the dialog. Wholesale switches off after the sale or when the order is cleared, and wholesale orders are tagged in Orders.</p>
+          </details>
+          <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I use a barcode scanner?</summary>
             <p className="mt-2 text-xs leading-5 text-slate-500">Plug in any USB or Bluetooth scanner that works as a keyboard. On Point of sale, scan an item and it is added to the order. To add several at once, type the quantity and a slash first, then scan — for example 24/ then scan adds 24. You can also type 24/ followed by the barcode or product name and press Enter. Admins assign barcodes from Inventory using Prices &amp; barcode, when adding a product, or with a barcode column in a CSV/JSON import.</p>
           </details>
@@ -1960,6 +1996,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
               ["F2", "Focus the product search"],
               ["F4", "Continue to payment"],
               ["F1 / F2 / F3", "In checkout: Cash / E-Wallet / Card"],
+              ["F4 in checkout", "Turn wholesale pricing on or off"],
               ["F-keys in pop-ups", "Choose a pop-up’s options (shown on each option)"],
               ["F9", "Clear the current order"],
               ["Esc", "Close a dialog or clear the search"],
@@ -2104,7 +2141,7 @@ function ProductImagePicker({
   );
 }
 
-function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing }: {
+function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing, priceOf, wholesale, savings }: {
   items: Product[];
   quantities: Record<string, number>;
   count: number;
@@ -2114,23 +2151,26 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
   onCheckout: () => void;
   onClear: () => void;
   isProcessing: boolean;
+  priceOf: (product: Product) => number;
+  wholesale: boolean;
+  savings: number;
 }) {
   return (
     <aside className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-[0_3px_16px_rgba(20,45,90,0.035)] 2xl:sticky 2xl:top-[96px]">
       <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
-        <div><div className="flex items-center gap-2"><ShoppingCart size={17} className="text-blue-600" /><h2 className="text-sm font-semibold">Current order</h2></div><p className="mt-1 pl-[25px] text-[11px] text-slate-400">New sale</p></div>
+        <div><div className="flex items-center gap-2"><ShoppingCart size={17} className="text-blue-600" /><h2 className="text-sm font-semibold">Current order</h2></div><p className="mt-1 flex items-center gap-1.5 pl-[25px] text-[11px] text-slate-400">New sale{wholesale && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Wholesale</span>}</p></div>
         {count > 0 && <button type="button" onClick={onClear} aria-keyshortcuts="F9" className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-red-500">Clear all <Kbd>F9</Kbd></button>}
       </div>
       <div className="flex items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px]"><span className="text-slate-500">Customer</span><button type="button" className="flex items-center gap-1 font-semibold text-blue-700">Walk-in customer <ChevronDown size={13} /></button></div>
       <div className="max-h-[330px] min-h-[180px] overflow-y-auto px-5">
         {items.length > 0 ? <ul className="divide-y divide-slate-100">{items.map((product) => <li key={product.id} className="flex items-center gap-3 py-4">
           <ProductArtwork product={product} className="h-11 w-11 rounded-xl text-xl" />
-          <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-1 text-[11px] text-slate-400">{money(product.price)} each</p><div className="mt-2 flex items-center gap-2"><button type="button" aria-label={`Remove one ${product.name}`} onClick={() => onChange(product.id, -1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Minus size={12} /></button><span className="w-4 text-center text-xs font-semibold">{quantities[product.id]}</span><button type="button" aria-label={`Add one ${product.name}`} onClick={() => onChange(product.id, 1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Plus size={12} /></button></div></div>
-          <div className="flex h-full flex-col items-end justify-between gap-4"><button type="button" aria-label={`Remove ${product.name} from order`} onClick={() => onChange(product.id, -quantities[product.id])} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button><span className="text-xs font-semibold">{money(product.price * quantities[product.id])}</span></div>
+          <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-1 text-[11px] text-slate-400">{money(priceOf(product))} each{priceOf(product) !== product.price && <span className="ml-1.5 line-through">{money(product.price)}</span>}</p><div className="mt-2 flex items-center gap-2"><button type="button" aria-label={`Remove one ${product.name}`} onClick={() => onChange(product.id, -1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Minus size={12} /></button><span className="w-4 text-center text-xs font-semibold">{quantities[product.id]}</span><button type="button" aria-label={`Add one ${product.name}`} onClick={() => onChange(product.id, 1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Plus size={12} /></button></div></div>
+          <div className="flex h-full flex-col items-end justify-between gap-4"><button type="button" aria-label={`Remove ${product.name} from order`} onClick={() => onChange(product.id, -quantities[product.id])} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button><span className="text-xs font-semibold">{money(priceOf(product) * quantities[product.id])}</span></div>
         </li>)}</ul> : <div className="flex min-h-[180px] flex-col items-center justify-center text-center"><div className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-500"><ShoppingCart size={20} /></div><p className="mt-3 text-xs font-semibold text-slate-700">Your order is empty</p><p className="mt-1 text-[11px] text-slate-400">Add a product to get started.</p></div>}
       </div>
       <div className="border-t border-slate-100 px-5 py-4">
-        <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(subtotal)}</span></div><div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
+        <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(wholesale ? subtotal + savings : subtotal)}</span></div>{wholesale && savings > 0 && <div className="flex justify-between text-emerald-700"><span>Wholesale savings</span><span className="font-medium">−{money(savings)}</span></div>}<div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
         <button type="button" disabled={!count || isProcessing} onClick={onCheckout} aria-keyshortcuts="F4" className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : `Continue to payment · ${money(total)}`}{!isProcessing && <Kbd>F4</Kbd>}</button>
         <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-slate-400"><WalletCards size={13} /> Secure, fast checkout</p>
       </div>
@@ -2261,7 +2301,7 @@ function OrdersView({ orders }: { orders: Order[] }) {
             {(["all", "cash", "e_wallet", "card"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : paymentMethodLabel(method)}</button>)}
           </div>
         </div>
-        <div className="divide-y divide-slate-100">{visibleOrders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div className="min-w-0"><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p><p className="mt-1 text-xs font-medium text-slate-600">{order.employeeName}</p><p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">{paymentMethodLabel(order.paymentMethod)}{order.paymentReferenceLast4 ? ` · Ref •••• ${order.paymentReferenceLast4}` : ""}</p>{order.paymentMethod === "cash" && order.cashReceived !== null && <p className="mt-1 text-[10px] text-slate-400">Received {money(order.cashReceived)} · Change {money(order.changeDue ?? 0)}</p>}</div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
+        <div className="divide-y divide-slate-100">{visibleOrders.map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><ReceiptText size={18} /></div><div className="min-w-0"><p className="text-sm font-semibold">{order.id}</p><p className="mt-1 text-xs text-slate-400">{order.items} items · {order.time}</p><p className="mt-1 text-xs font-medium text-slate-600">{order.employeeName}</p><p className="mt-1 text-[10px] font-medium uppercase tracking-wide text-slate-500">{paymentMethodLabel(order.paymentMethod)}{order.paymentReferenceLast4 ? ` · Ref •••• ${order.paymentReferenceLast4}` : ""}{order.isWholesale && <span className="ml-2 rounded-full bg-emerald-50 px-2 py-0.5 normal-case tracking-normal text-emerald-700">Wholesale</span>}</p>{order.paymentMethod === "cash" && order.cashReceived !== null && <p className="mt-1 text-[10px] text-slate-400">Received {money(order.cashReceived)} · Change {money(order.changeDue ?? 0)}</p>}</div></div><div className="text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-1 text-[10px] font-medium text-emerald-600">Completed</p></div></div>)}</div>
         {visibleOrders.length === 0 && <div className="py-16 text-center text-sm text-slate-400">{orders.length ? `No ${paymentFilter === "all" ? "" : `${paymentMethodLabel(paymentFilter)} `}orders in the recent transactions.` : "No orders yet. Completed sales will show up here."}</div>}
       </div>
     </section>
