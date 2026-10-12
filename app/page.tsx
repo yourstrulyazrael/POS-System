@@ -10,6 +10,7 @@ import {
   ChevronDown,
   CircleDollarSign,
   ClipboardList,
+  EllipsisVertical,
   Clock3,
   Coffee,
   CreditCard,
@@ -46,6 +47,7 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 import { AnalyticsReportsView } from "@/components/analytics-reports";
 import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
 import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
@@ -1836,6 +1838,7 @@ export default function Home() {
                 selectedImage={selectedProductImage}
                 onIconChange={setSelectedProductIcon}
                 onImageChange={setSelectedProductImage}
+                optional
               />
               <div className="flex gap-3 pt-2"><button type="button" onClick={() => { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button><button type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add product <Kbd>Enter</Kbd></button></div>
             </form>
@@ -2086,7 +2089,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I add stock or update product photos?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Admins can open Inventory to restock an item or use its Image action to upload or change its custom photo. New products can also be given a custom image when added.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Admins open Inventory and use the ⋮ Actions menu on a product to restock it or add or change its image. Images are optional — when adding a product you can skip the image and an icon is chosen automatically.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I sell something that isn’t in my products?</summary>
@@ -2102,7 +2105,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I use a barcode scanner?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Plug in any USB or Bluetooth scanner that works as a keyboard. On Point of sale, scan an item and it is added to the order. To add several at once, type the quantity and a slash first, then scan — for example 24/ then scan adds 24. You can also type 24/ followed by the barcode or product name and press Enter. Admins assign barcodes from Inventory using Prices &amp; barcode, when adding a product, or with a barcode column in a CSV/JSON import.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Plug in any USB or Bluetooth scanner that works as a keyboard. On Point of sale, scan an item and it is added to the order. To add several at once, type the quantity and a slash first, then scan — for example 24/ then scan adds 24. You can also type 24/ followed by the barcode or product name and press Enter. Admins assign barcodes from Inventory using Edit details in a product’s ⋮ Actions menu, when adding a product, or with a barcode column in a CSV/JSON import.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">What does the Shifts page show?</summary>
@@ -2275,6 +2278,7 @@ function ProductImagePicker({
   onRemoveExisting,
   onIconChange,
   onImageChange,
+  optional = false,
 }: {
   selectedIcon: string;
   selectedImage: File | null;
@@ -2283,14 +2287,29 @@ function ProductImagePicker({
   onRemoveExisting?: () => void;
   onIconChange: (icon: string) => void;
   onImageChange: (image: File | null) => void;
+  optional?: boolean;
 }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Optional pickers start collapsed; a product without an image or preset
+  // gets an automatic icon from its category and name.
+  const [expanded, setExpanded] = useState(!optional);
+  const openFileOnExpandRef = useRef(false);
   const canRemoveImage = !!selectedImage || (!!existingImageUrl && !existingImageRemoved && !!onRemoveExisting);
   useFunctionKeys({
-    F1: () => fileInputRef.current?.click(),
+    F1: () => {
+      if (expanded) fileInputRef.current?.click();
+      else { openFileOnExpandRef.current = true; setExpanded(true); }
+    },
     ...(canRemoveImage ? { F2: () => (selectedImage ? onImageChange(null) : onRemoveExisting?.()) } : {}),
   });
+
+  useEffect(() => {
+    if (expanded && openFileOnExpandRef.current) {
+      openFileOnExpandRef.current = false;
+      fileInputRef.current?.click();
+    }
+  }, [expanded]);
 
   useEffect(() => {
     if (!selectedImage) {
@@ -2304,9 +2323,23 @@ function ProductImagePicker({
 
   const imagePreviewUrl = previewUrl ?? (existingImageRemoved ? null : existingImageUrl);
 
+  if (!expanded) {
+    return (
+      <div>
+        <button type="button" aria-keyshortcuts="F1" onClick={() => setExpanded(true)} className="flex w-full items-center gap-2 rounded-lg border border-dashed border-slate-200 px-3 py-2.5 text-left text-xs font-semibold text-slate-600 hover:border-blue-300 hover:text-blue-700">
+          <ImageIcon size={15} /><span className="flex-1">Add an image or icon <span className="font-normal text-slate-400">(optional)</span></span><Kbd>F1</Kbd>
+        </button>
+        <p className="mt-1.5 text-[11px] text-slate-400">Skip it and an icon is picked automatically from the category.</p>
+      </div>
+    );
+  }
+
   return (
     <fieldset className="space-y-2">
-      <legend className="text-sm font-medium text-slate-700">Product image or icon</legend>
+      <legend className="flex w-full items-center justify-between text-sm font-medium text-slate-700">
+        <span>Product image or icon {optional && <span className="font-normal text-slate-400">(optional)</span>}</span>
+        {optional && <button type="button" onClick={() => { onImageChange(null); onIconChange("auto"); setExpanded(false); }} className="text-[11px] font-semibold text-slate-400 hover:text-slate-700">Skip</button>}
+      </legend>
       <div className="flex items-start gap-3">
         <div className="grid h-16 w-16 shrink-0 place-items-center overflow-hidden rounded-xl bg-blue-50 text-3xl">
           {imagePreviewUrl ? <Image src={imagePreviewUrl} alt="Product image preview" width={64} height={64} unoptimized className="h-full w-full object-cover" /> : productIcons.find((icon) => icon.id === selectedIcon)?.emoji || "✨"}
@@ -2427,7 +2460,20 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditPrices(product)} aria-label={`Edit prices, barcode and category for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><CircleDollarSign size={14} /> Edit details</button><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
+                <DropdownMenu>
+                  <DropdownMenuTrigger aria-label={`Actions for ${product.name}`} title="Actions" className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-300 data-[state=open]:bg-slate-100 data-[state=open]:text-slate-700 dark:hover:bg-slate-800 dark:data-[state=open]:bg-slate-800">
+                    <EllipsisVertical size={16} />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-48 rounded-xl border-slate-100 bg-white p-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900">
+                    <DropdownMenuLabel className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Actions</DropdownMenuLabel>
+                    <DropdownMenuItem onSelect={() => onEditPrices(product)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><CircleDollarSign /> Edit details</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => onEditImage(product)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><FileUp /> {product.imageUrl ? "Change image" : "Add image"}</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => onRestock(product)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><PackagePlus /> Restock</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <button type="button" aria-label={`Remove ${product.name}`} title="Remove product" onClick={() => onRemove(product)} className="grid h-8 w-8 place-items-center rounded-lg text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button>
+              </div></td></tr>)}</tbody></table></div>
       </div>
     </section>
   );
