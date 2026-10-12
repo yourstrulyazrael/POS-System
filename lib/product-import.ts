@@ -184,53 +184,115 @@ export function readXlsxRows(buffer: ArrayBuffer): string[][] {
   return Array.from(rows, (row) => row ?? []);
 }
 
-// ---------- Template ----------
+// ---------- Writing .xlsx (template and export) ----------
+
+type Cell = string | number | null;
+type SheetSpec = { name: string; rows: Cell[][]; widths: number[]; textColumns?: number[] };
 
 const escapeXml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const columnLetter = (index: number) => {
+  let letters = "";
+  for (let rest = index + 1; rest > 0; rest = Math.floor((rest - 1) / 26)) letters = String.fromCharCode(65 + ((rest - 1) % 26)) + letters;
+  return letters;
+};
 
-function sheetXml(rows: string[][], options: { headerStyle: number; textColumns?: number[]; widths: number[] }) {
-  const columnLetter = (index: number) => String.fromCharCode(65 + index);
-  const cols = options.widths.map((width, index) =>
-    `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"${options.textColumns?.includes(index) ? ' style="2"' : ""}/>`).join("");
-  const body = rows.map((row, rowIndex) =>
-    `<row r="${rowIndex + 1}">${row.map((value, column) =>
-      `<c r="${columnLetter(column)}${rowIndex + 1}" t="inlineStr"${rowIndex === 0 ? ` s="${options.headerStyle}"` : ""}><is><t xml:space="preserve">${escapeXml(value)}</t></is></c>`).join("")}</row>`).join("");
+// Style ids from styles.xml below: 0 default, 1 bold header, 2 Text (for
+// barcodes), 3 ₱ number with 2 decimals.
+function sheetXml({ rows, widths, textColumns = [] }: SheetSpec, moneyColumns: number[]) {
+  const cols = widths.map((width, index) => {
+    const style = textColumns.includes(index) ? ' style="2"' : "";
+    return `<col min="${index + 1}" max="${index + 1}" width="${width}" customWidth="1"${style}/>`;
+  }).join("");
+  const body = rows.map((row, rowIndex) => `<row r="${rowIndex + 1}">${row.map((value, column) => {
+    if (value === null || value === "") return "";
+    const reference = `${columnLetter(column)}${rowIndex + 1}`;
+    if (rowIndex === 0) return `<c r="${reference}" t="inlineStr" s="1"><is><t xml:space="preserve">${escapeXml(String(value))}</t></is></c>`;
+    if (typeof value === "number") return `<c r="${reference}"${moneyColumns.includes(column) ? ' s="3"' : ""}><v>${value}</v></c>`;
+    return `<c r="${reference}" t="inlineStr"${textColumns.includes(column) ? ' s="2"' : ""}><is><t xml:space="preserve">${escapeXml(value)}</t></is></c>`;
+  }).join("")}</row>`).join("");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>${cols}</cols><sheetData>${body}</sheetData></worksheet>`;
 }
 
-// Builds products-template.xlsx: a "Products" sheet with the headers (the one
-// that is imported) and a "Guide" sheet describing each column.
-export function buildTemplateXlsx() {
-  const barcodeColumn = importColumns.findIndex((column) => column.field === "barcode");
-  const products = sheetXml([importColumns.map((column) => column.header)], {
-    headerStyle: 1,
-    textColumns: [barcodeColumn],
-    widths: importColumns.map((column) => (column.field === "name" ? 32 : column.field === "barcode" ? 18 : 16)),
-  });
-  const guide = sheetXml([
+function buildWorkbook(sheets: SheetSpec[], moneyColumnsBySheet: number[][]) {
+  const sheetOverrides = sheets.map((_, index) => `<Override PartName="/xl/worksheets/sheet${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("");
+  const sheetEntries = sheets.map((sheet, index) => `<sheet name="${escapeXml(sheet.name)}" sheetId="${index + 1}" r:id="rId${index + 1}"/>`).join("");
+  const sheetRelations = sheets.map((_, index) => `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${index + 1}.xml"/>`).join("");
+  const files: Record<string, string> = {
+    "[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${sheetOverrides}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+    "_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    "xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheetEntries}</sheets></workbook>`,
+    "xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheetRelations}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+    "xl/styles.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="&quot;₱&quot;#,##0.00"/></numFmts><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="4"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`,
+  };
+  sheets.forEach((sheet, index) => { files[`xl/worksheets/sheet${index + 1}.xml`] = sheetXml(sheet, moneyColumnsBySheet[index] ?? []); });
+  return zipSync(Object.fromEntries(Object.entries(files).map(([path, xml]) => [path, strToU8(xml)])));
+}
+
+const productColumnWidths = importColumns.map((column) => (column.field === "name" ? 32 : column.field === "barcode" ? 18 : 16));
+const barcodeColumn = importColumns.findIndex((column) => column.field === "barcode");
+const moneyColumns = importColumns.flatMap((column, index) => (column.field.endsWith("_price") ? [index] : []));
+
+const guideSheet: SheetSpec = {
+  name: "Guide",
+  rows: [
     ["Column", "Required", "What to enter"],
     ...importColumns.map((column) => [column.header, column.required ? "Yes" : "No", column.note]),
     ["", "", ""],
     ["Tip", "", "Fill in the Products sheet only. Column order doesn’t matter, and extra columns are ignored."],
-  ], { headerStyle: 1, widths: [18, 10, 80] });
+  ],
+  widths: [18, 10, 80],
+};
 
-  const files = {
-    "[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
-    "_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
-    "xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Products" sheetId="1" r:id="rId1"/><sheet name="Guide" sheetId="2" r:id="rId2"/></sheets></workbook>`,
-    "xl/_rels/workbook.xml.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
-    // Style 0 = default, 1 = bold header, 2 = Text format (numFmt 49) for barcodes.
-    "xl/styles.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>`,
-    "xl/worksheets/sheet1.xml": products,
-    "xl/worksheets/sheet2.xml": guide,
+// products-template.xlsx: a "Products" sheet with just the headers (the sheet
+// that is imported) and a "Guide" sheet describing each column.
+export function buildTemplateXlsx() {
+  return buildWorkbook([
+    { name: "Products", rows: [importColumns.map((column) => column.header)], widths: productColumnWidths, textColumns: [barcodeColumn] },
+    guideSheet,
+  ], [moneyColumns]);
+}
+
+export type ExportProduct = {
+  name: string;
+  category: string;
+  price: number;
+  wholesalePrice: number;
+  costPrice: number;
+  costPriceKnown: boolean;
+  stock: number;
+  barcode: string | null;
+};
+
+// Inventory export in the import layout, so the file can be edited and
+// imported again. An unset cost price is left blank (blank keeps it unset).
+export function buildProductsXlsx(products: ExportProduct[]) {
+  const valueFor = (product: ExportProduct, field: ImportField): Cell => {
+    switch (field) {
+      case "name": return product.name;
+      case "category": return product.category;
+      case "retail_price": return product.price;
+      case "wholesale_price": return product.wholesalePrice;
+      case "cost_price": return product.costPriceKnown ? product.costPrice : null;
+      case "stock": return product.stock;
+      case "barcode": return product.barcode;
+      default: return null;
+    }
   };
-  return zipSync(Object.fromEntries(Object.entries(files).map(([path, xml]) => [path, strToU8(xml)])));
+  return buildWorkbook([
+    {
+      name: "Products",
+      rows: [importColumns.map((column) => column.header), ...products.map((product) => importColumns.map((column) => valueFor(product, column.field)))],
+      widths: productColumnWidths,
+      textColumns: [barcodeColumn],
+    },
+    guideSheet,
+  ], [moneyColumns]);
 }
 
 // Reads any supported import file into raw records.

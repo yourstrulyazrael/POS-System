@@ -23,6 +23,7 @@ import {
   ImageIcon,
   ImageOff,
   PenLine,
+  Printer,
   LogOut,
   Minus,
   PackagePlus,
@@ -51,7 +52,7 @@ import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
-import { buildTemplateXlsx, importColumns, readProductFile, type RawProductRecord } from "@/lib/product-import";
+import { buildProductsXlsx, buildTemplateXlsx, importColumns, readProductFile, type RawProductRecord } from "@/lib/product-import";
 import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
 import Image from "next/image";
@@ -2192,16 +2193,95 @@ function ProductArtwork({ product, className = "" }: { product: Product; classNa
   );
 }
 
-function downloadImportTemplate() {
-  const blob = new Blob([new Uint8Array(buildTemplateXlsx())], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+function downloadXlsx(data: Uint8Array, fileName: string) {
+  const blob = new Blob([new Uint8Array(data)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = "products-template.xlsx";
+  link.download = fileName;
   document.body.appendChild(link);
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function downloadImportTemplate() {
+  downloadXlsx(buildTemplateXlsx(), "products-template.xlsx");
+}
+
+const manilaDateStamp = () => new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Manila" });
+const sortForReport = (items: Product[]) =>
+  [...items].sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
+
+// Same layout as the import template, so it can be edited and re-imported.
+function exportInventoryExcel(items: Product[]) {
+  downloadXlsx(buildProductsXlsx(sortForReport(items)), `inventory-${manilaDateStamp()}.xlsx`);
+}
+
+const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+// Builds a printable inventory report and opens the browser's print dialog
+// from a hidden frame (choose "Save as PDF"). The page title becomes the
+// suggested PDF file name.
+function exportInventoryPdf(items: Product[]) {
+  const sorted = sortForReport(items);
+  const units = sorted.reduce((sum, product) => sum + product.stock, 0);
+  const retailValue = sorted.reduce((sum, product) => sum + product.price * product.stock, 0);
+  const costed = sorted.filter((product) => product.costPriceKnown);
+  const costValue = costed.reduce((sum, product) => sum + product.costPrice * product.stock, 0);
+  const lowStock = sorted.filter((product) => product.stock <= 5).length;
+  const generated = new Date().toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Manila" });
+  const rows = sorted.map((product) => `<tr${product.stock <= 5 ? ' class="low"' : ""}>
+    <td>${escapeHtml(product.name)}</td><td>${escapeHtml(product.category)}</td><td class="mono">${escapeHtml(product.barcode ?? "")}</td>
+    <td class="num">${product.costPriceKnown ? money(product.costPrice) : "—"}</td><td class="num">${product.wholesalePrice > 0 ? money(product.wholesalePrice) : "—"}</td>
+    <td class="num">${money(product.price)}</td><td class="num">${product.stock}</td><td class="num">${money(product.price * product.stock)}</td></tr>`).join("");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>inventory-${manilaDateStamp()}</title><style>
+    @page { size: A4 landscape; margin: 12mm; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 10px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #0f172a; }
+    header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #2563eb; padding-bottom: 8px; margin-bottom: 12px; }
+    h1 { margin: 0; font-size: 18px; } .muted { color: #64748b; }
+    .summary { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 14px; }
+    .summary div { border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 8px; }
+    .summary b { display: block; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; }
+    thead { display: table-header-group; }
+    th { text-align: left; font-size: 8.5px; text-transform: uppercase; letter-spacing: .04em; color: #64748b; border-bottom: 1px solid #cbd5e1; padding: 5px 6px; }
+    td { padding: 4px 6px; border-bottom: 1px solid #f1f5f9; }
+    tr { break-inside: avoid; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; } th.num { text-align: right; }
+    .mono { font-family: ui-monospace, Consolas, monospace; font-size: 9px; color: #475569; }
+    tr.low td { background: #fffbeb; }
+    tfoot td { font-weight: 700; border-top: 1px solid #cbd5e1; border-bottom: 0; }
+    footer { margin-top: 10px; font-size: 8.5px; }
+  </style></head><body>
+    <header><div><div class="muted">Clover &amp; Co. · Point of sale</div><h1>Inventory report</h1></div><div class="muted">Generated ${escapeHtml(generated)} · Asia/Manila</div></header>
+    <section class="summary">
+      <div><span class="muted">Products</span><b>${sorted.length}</b></div>
+      <div><span class="muted">Units in stock</span><b>${units}</b></div>
+      <div><span class="muted">Stock value (retail)</span><b>${money(retailValue)}</b></div>
+      <div><span class="muted">Stock value (cost)</span><b>${money(costValue)}</b>${costed.length < sorted.length ? `<span class="muted">${sorted.length - costed.length} without cost</span>` : ""}</div>
+      <div><span class="muted">Low stock (≤ 5)</span><b>${lowStock}</b></div>
+    </section>
+    <table><thead><tr><th>Product</th><th>Category</th><th>Barcode</th><th class="num">Cost</th><th class="num">Wholesale</th><th class="num">Retail</th><th class="num">Stock</th><th class="num">Value (retail)</th></tr></thead>
+    <tbody>${rows}</tbody>
+    <tfoot><tr><td colspan="6">Total</td><td class="num">${units}</td><td class="num">${money(retailValue)}</td></tr></tfoot></table>
+    <footer class="muted">Low-stock rows are highlighted. Stock value (cost) counts only products with a recorded cost price.</footer>
+  </body></html>`;
+
+  const frame = document.createElement("iframe");
+  frame.setAttribute("aria-hidden", "true");
+  frame.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
+  frame.onload = () => {
+    const printWindow = frame.contentWindow;
+    if (!printWindow) return frame.remove();
+    const cleanup = () => window.setTimeout(() => frame.remove(), 500);
+    printWindow.addEventListener("afterprint", cleanup, { once: true });
+    printWindow.focus();
+    printWindow.print();
+  };
+  frame.srcdoc = html;
+  document.body.appendChild(frame);
 }
 
 // Import products from Excel, CSV or JSON: choose a file, review what will
@@ -2616,6 +2696,14 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
         <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Inventory</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Inventory</h1><p className="mt-1 text-sm text-slate-500">Keep your products and stock levels up to date.</p></div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={onImport} className="flex h-10 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><FileSpreadsheet size={16} className="text-emerald-600" /> Import products</button>
+          <DropdownMenu>
+            <DropdownMenuTrigger disabled={products.length === 0} className="flex h-10 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 outline-none hover:border-blue-200 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-300 disabled:opacity-50 data-[state=open]:border-blue-200 data-[state=open]:text-blue-700"><Download size={16} /> Export <ChevronDown size={14} /></DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56 rounded-xl border-slate-100 bg-white p-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900">
+              <DropdownMenuLabel className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Export {products.length} products</DropdownMenuLabel>
+              <DropdownMenuItem onSelect={() => exportInventoryExcel(products)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><FileSpreadsheet className="text-emerald-600" /><span><span className="block font-semibold">Excel (.xlsx)</span><span className="block text-[10px] text-slate-400">Editable; can be imported again</span></span></DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => exportInventoryPdf(products)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><Printer className="text-red-500" /><span><span className="block font-semibold">PDF report</span><span className="block text-[10px] text-slate-400">Print, or choose Save as PDF</span></span></DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><PackagePlus size={16} /> Add product</button>
         </div>
       </div>
