@@ -17,6 +17,9 @@ import {
   CircleHelp,
   LayoutDashboard,
   FileUp,
+  ImageIcon,
+  ImageOff,
+  PenLine,
   LogOut,
   Minus,
   PackagePlus,
@@ -44,7 +47,7 @@ import { AnalyticsReportsView } from "@/components/analytics-reports";
 import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
 import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
 import Image from "next/image";
 
@@ -99,6 +102,8 @@ type OrderRow = {
   employee_id?: string | null;
   is_wholesale: boolean;
 };
+// A "Quick Add" line for something not in the product catalog.
+type CustomItem = { id: string; description: string; quantity: number; unitPrice: number };
 type Employee = { id: string; email: string; full_name: string; role: "employee" };
 type DashboardStats = { sales_total: number; orders_today: number; active_products: number; units_in_stock: number; active_employees: number };
 type SalesPeriod = "today" | "7days" | "30days";
@@ -110,18 +115,7 @@ const paymentMethodLabel = (method: PaymentMethod) =>
   method === "e_wallet" ? "E-Wallet" : method === "card" ? "Card" : "Cash";
 
 const categoryColors = ["bg-sky-50", "bg-amber-50", "bg-violet-50", "bg-rose-50"];
-const sariSariCategories = [
-  "Rice & Grains",
-  "Canned Goods",
-  "Instant Noodles",
-  "Snacks",
-  "Eggs & Dairy",
-  "Beverages",
-  "Coffee & Drinks",
-  "Condiments",
-  "Personal Care",
-  "Household",
-];
+const showImagesStorageKey = "pos.showProductImages";
 
 const productIcons = [
   { id: "auto", label: "Auto", emoji: "" },
@@ -307,6 +301,15 @@ function parseSaleEntry(value: string) {
   return match ? { quantity: Number(match[1]), term: match[2].trim() } : { quantity: null, term: value.trim() };
 }
 
+// Categories are free text, so typing a new name creates one. Spacing is
+// tidied and a name matching an existing category (ignoring case) reuses it,
+// so "snacks" doesn't become a second "Snacks" chip. Returns "" if invalid.
+function normalizeCategory(value: unknown, existing: string[]) {
+  const name = String(value ?? "").trim().replace(/\s+/g, " ");
+  if (!name || name.length > 80) return "";
+  return existing.find((category) => category.toLowerCase() === name.toLowerCase()) ?? name;
+}
+
 // Barcodes are stored as scanned: 1–64 printable ASCII characters, no spaces.
 // Returns null for an empty value and undefined for an invalid one.
 function normalizeBarcode(value: unknown) {
@@ -392,6 +395,9 @@ export default function Home() {
   const [showNotifications, setShowNotifications] = useState(false);
   const [readNotifications, setReadNotifications] = useState<string[]>([]);
   const [category, setCategory] = useState("All items");
+  const [customItems, setCustomItems] = useState<CustomItem[]>([]);
+  const [quickAdd, setQuickAdd] = useState<{ quantity: number; description: string; note: string } | null>(null);
+  const [showImages, setShowImages] = useState(true);
   const [search, setSearch] = useState("");
   const [activePage, setActivePage] = useState<Page>("pos");
   const [showAddProduct, setShowAddProduct] = useState(false);
@@ -420,27 +426,33 @@ export default function Home() {
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const { quantity: entryQuantity, term: searchTerm } = parseSaleEntry(search);
-  const categories = useMemo(
-    () => ["All items", ...new Set([...sariSariCategories, ...products.map((product) => product.category)])],
+  // Only categories that actually have products. A category is created by
+  // giving a product a new category name (when adding, editing or importing).
+  const productCategories = useMemo(
+    () => [...new Set(products.map((product) => product.category))].sort((a, b) => a.localeCompare(b)),
     [products],
   );
+  const categories = ["All items", ...productCategories];
+  const activeCategory = categories.includes(category) ? category : "All items";
   const visibleProducts = useMemo(
     () =>
       products.filter(
         (product) =>
-          (category === "All items" || product.category === category) &&
+          (activeCategory === "All items" || product.category === activeCategory) &&
           (product.name.toLowerCase().includes(searchTerm.toLowerCase()) || (!!searchTerm && product.barcode === searchTerm)),
       ),
-    [category, products, searchTerm],
+    [activeCategory, products, searchTerm],
   );
   const cartItems = products.filter((product) => cart[product.id]);
-  const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0);
+  const customTotal = customItems.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
+  const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0) + customItems.reduce((sum, item) => sum + item.quantity, 0);
   // Wholesale mode charges each product's wholesale price; products without
   // one (₱0) stay at retail. place_order applies the same rule server-side.
+  // Custom items always use the price entered for them.
   const unitPrice = (product: Product) => (wholesaleMode && product.wholesalePrice > 0 ? product.wholesalePrice : product.price);
-  const subtotal = cartItems.reduce((total, product) => total + unitPrice(product) * cart[product.id], 0);
+  const subtotal = cartItems.reduce((total, product) => total + unitPrice(product) * cart[product.id], 0) + customTotal;
   const total = Math.round(subtotal * 100) / 100;
-  const retailTotal = Math.round(cartItems.reduce((sum, product) => sum + product.price * cart[product.id], 0) * 100) / 100;
+  const retailTotal = Math.round((cartItems.reduce((sum, product) => sum + product.price * cart[product.id], 0) + customTotal) * 100) / 100;
   const wholesaleSavings = Math.round((retailTotal - total) * 100) / 100;
   const itemsWithoutWholesalePrice = cartItems.filter((product) => product.wholesalePrice <= 0);
   const notifications = [
@@ -587,6 +599,40 @@ export default function Home() {
 
   // Enter in the search box: a scanned/typed barcode, or the only matching
   // product, is added to the order. "24/<barcode>" adds 24 of that item.
+  function openQuickAdd() {
+    setQuickAdd({ quantity: entryQuantity ?? 1, description: searchTerm.slice(0, 120), note: "" });
+    setSearch("");
+  }
+
+  function clearOrder() {
+    setCart({});
+    setCustomItems([]);
+    setWholesaleMode(false);
+  }
+
+  function addCustomItem(item: Omit<CustomItem, "id">) {
+    setCustomItems((current) => [...current, { ...item, id: crypto.randomUUID() }]);
+    setQuickAdd(null);
+    setNotice(`Added ${item.quantity} × ${item.description} (custom item) to the order.`);
+  }
+
+  function changeCustomQuantity(id: string, difference: number) {
+    setCustomItems((current) => current
+      .map((item) => (item.id === id ? { ...item, quantity: Math.min(9999, item.quantity + difference) } : item))
+      .filter((item) => item.quantity > 0));
+  }
+
+  function toggleImages() {
+    setShowImages((current) => {
+      try {
+        window.localStorage.setItem(showImagesStorageKey, current ? "off" : "on");
+      } catch {
+        // Storage can be unavailable (private mode); the toggle still works for this visit.
+      }
+      return !current;
+    });
+  }
+
   function submitSaleEntry() {
     const { quantity, term } = parseSaleEntry(search);
     const keepEntry = () => searchInputRef.current?.select();
@@ -600,9 +646,21 @@ export default function Home() {
       return;
     }
     const product = products.find((item) => item.barcode === term) ?? (visibleProducts.length === 1 ? visibleProducts[0] : undefined);
-    if (!product) {
-      setNotice(visibleProducts.length > 1 ? `${visibleProducts.length} products match “${term}”. Keep typing or pick one.` : `No product found for “${term}”.`);
+    if (!product && visibleProducts.length > 1) {
+      setNotice(`${visibleProducts.length} products match “${term}”. Keep typing or pick one.`);
       keepEntry();
+      return;
+    }
+    if (!product) {
+      // Not in the catalog: offer to sell it as a custom item. A typed name
+      // becomes the description; an unknown barcode is only mentioned.
+      const looksLikeBarcode = /^[!-~]+$/.test(term) && /\d/.test(term) && !/\s/.test(term);
+      setQuickAdd({
+        quantity: quantity ?? 1,
+        description: looksLikeBarcode ? "" : term.slice(0, 120),
+        note: looksLikeBarcode ? `Barcode ${term} isn’t in your products.` : `“${term}” isn’t in your products.`,
+      });
+      setSearch("");
       return;
     }
     if (addProductQuantity(product, quantity ?? 1)) setSearch("");
@@ -647,6 +705,7 @@ export default function Home() {
     else if (editingProductImage) { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }
     else if (showAddEmployee) setShowAddEmployee(false);
     else if (restockProduct) setRestockProduct(null);
+    else if (quickAdd) setQuickAdd(null);
     else if (showMobileCart) setShowMobileCart(false);
     else if (showNotifications) setShowNotifications(false);
     else return false;
@@ -657,7 +716,7 @@ export default function Home() {
     if (!signedIn || event.defaultPrevented || event.isComposing) return;
     const target = event.target as HTMLElement | null;
     const inTextField = !!target?.closest("input, textarea, select, [contenteditable='true']");
-    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct;
+    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd;
     const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
 
     if (event.key === "Escape") {
@@ -691,7 +750,13 @@ export default function Home() {
       if (itemCount && !isLoading) { setNotice(""); setShowCheckoutDialog(true); }
     } else if (event.key === "F9") {
       event.preventDefault();
-      if (itemCount) { setCart({}); setWholesaleMode(false); setNotice("Order cleared."); }
+      if (itemCount) { clearOrder(); setNotice("Order cleared."); }
+    } else if (event.key === "F3") {
+      event.preventDefault();
+      openQuickAdd();
+    } else if (event.key === "F8") {
+      event.preventDefault();
+      toggleImages();
     } else if (!inTextField && !event.ctrlKey && !event.altKey && !event.metaKey && event.key.length === 1 && event.key !== " ") {
       // Type-to-search: typing or scanning anywhere on the POS starts a new
       // entry in the search box, where Enter adds the item.
@@ -723,6 +788,14 @@ export default function Home() {
     const timer = window.setTimeout(() => submitSaleEntryRef.current(), 150);
     return () => window.clearTimeout(timer);
   }, [activePage, entryMatchesBarcode, search]);
+
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(showImagesStorageKey) === "off") setShowImages(false);
+    } catch {
+      // Storage unavailable: keep images on.
+    }
+  }, []);
 
   const shortcutHandlerRef = useRef(handleShortcut);
   useEffect(() => {
@@ -766,7 +839,10 @@ export default function Home() {
     try {
       const supabase = createClient();
       const { data, error } = await supabase.rpc("place_order", {
-        p_items: cartItems.map((product) => ({ product_id: product.id, quantity: cart[product.id] })),
+        p_items: [
+          ...cartItems.map((product) => ({ product_id: product.id, quantity: cart[product.id] })),
+          ...customItems.map((item) => ({ description: item.description, quantity: item.quantity, unit_price: item.unitPrice })),
+        ],
         p_payment_method: paymentMethod,
         p_payment_reference_last4: paymentMethod === "cash" ? null : paymentReferenceLast4,
         p_cash_received: receivedAmount,
@@ -780,11 +856,10 @@ export default function Home() {
       }
       const newOrderId = data.order_id.slice(0, 8);
       const wasWholesale = wholesaleMode;
-      setCart({});
+      clearOrder();
       setShowCheckoutDialog(false);
       setCashReceived("");
       setPaymentReferenceLast4("");
-      setWholesaleMode(false);
       setNotice(`${wasWholesale ? "Wholesale order" : "Order"} #${newOrderId} placed successfully.`);
       try {
         await refreshWorkspace();
@@ -794,6 +869,9 @@ export default function Home() {
     } catch (error) {
       if (wholesaleMode && error && typeof error === "object" && "code" in error && (error.code === "PGRST202" || error.code === "42883")) {
         setNotice("Wholesale checkout needs the database update. Apply migration 202610120009_wholesale_checkout.sql, then retry.");
+      } else if (customItems.length && error && typeof error === "object" && "message" in error && /needs a product|duplicate product rows/.test(String(error.message))) {
+        // The pre-custom-item place_order rejects lines without a product.
+        setNotice("Custom items need the database update. Apply migration 202610120010_custom_order_items.sql, then retry.");
       } else {
         setNotice(error instanceof Error ? error.message : error && typeof error === "object" && "message" in error ? String(error.message) : "Unable to complete checkout.");
       }
@@ -849,8 +927,12 @@ export default function Home() {
     const wholesalePrice = Number(formData.get("wholesale_price"));
     const price = Number(formData.get("price"));
     const stock = Number(formData.get("stock"));
-    const selectedCategory = String(formData.get("category") ?? sariSariCategories[0]);
+    const selectedCategory = normalizeCategory(formData.get("category"), productCategories);
     const barcode = normalizeBarcode(formData.get("barcode"));
+    if (!selectedCategory) {
+      setNotice("Enter a category of up to 80 characters — pick an existing one or type a new name.");
+      return;
+    }
     if (barcode === undefined) {
       setNotice("Enter a barcode of up to 64 letters, digits, or symbols without spaces.");
       return;
@@ -951,6 +1033,11 @@ export default function Home() {
     const wholesalePrice = Number(formData.get("wholesale_price"));
     const retailPrice = Number(formData.get("price"));
     const barcode = normalizeBarcode(formData.get("barcode"));
+    const productCategory = normalizeCategory(formData.get("category"), productCategories);
+    if (!productCategory) {
+      setNotice("Enter a category of up to 80 characters — pick an existing one or type a new name.");
+      return;
+    }
     if (!Number.isFinite(costPrice) || costPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(retailPrice) || retailPrice <= 0) {
       setNotice("Enter valid cost and wholesale prices, and a retail price above ₱0.");
       return;
@@ -968,6 +1055,7 @@ export default function Home() {
         wholesale_price: wholesalePrice,
         price: retailPrice,
         barcode,
+        category: productCategory,
       }).eq("id", editingProductPrices.id);
       if (error) throw error;
       const productName = editingProductPrices.name;
@@ -1264,11 +1352,16 @@ export default function Home() {
         ? parseProductJson(text)
         : parseProductCsv(text);
       if (rows.length === 0) throw new Error("The selected file does not contain any products.");
+      // Each new category in the file is created as-is; later rows that differ
+      // only in case or spacing reuse it (and existing categories' spelling).
+      const knownCategories = [...productCategories];
+      const normalizedRows = rows.map((product) => {
+        const productCategory = normalizeCategory(product.category, knownCategories);
+        if (!knownCategories.includes(productCategory)) knownCategories.push(productCategory);
+        return { ...product, category: productCategory, active: true };
+      });
       const supabase = createClient();
-      const { error } = await supabase.from("products").upsert(
-        rows.map((product) => ({ ...product, active: true })),
-        { onConflict: "name" },
-      );
+      const { error } = await supabase.from("products").upsert(normalizedRows, { onConflict: "name" });
       if (error) throw error;
       await refreshWorkspace();
       setNotice(`${rows.length} product${rows.length === 1 ? "" : "s"} imported successfully.`);
@@ -1599,12 +1692,24 @@ export default function Home() {
                     </div>
                   </div>
 
-                  <div className="mb-5 flex gap-2 overflow-x-auto pb-1">
-                    {categories.map((item) => (
-                      <button type="button" key={item} onClick={() => setCategory(item)} className={`shrink-0 rounded-full px-4 py-2 text-xs font-semibold transition ${category === item ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "border border-slate-200 bg-white text-slate-500 hover:border-blue-200 hover:text-blue-700"}`}>
-                        {item}
+                  <div className="mb-5 flex flex-wrap items-center gap-2">
+                    {productCategories.length > 1 && (
+                      <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1" aria-label="Filter by category">
+                        {categories.map((item) => (
+                          <button type="button" key={item} onClick={() => setCategory(item)} aria-pressed={activeCategory === item} className={`shrink-0 rounded-full px-3.5 py-1.5 text-xs font-semibold transition ${activeCategory === item ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "border border-slate-200 bg-white text-slate-500 hover:border-blue-200 hover:text-blue-700"}`}>
+                            {item}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div className="ml-auto flex shrink-0 gap-2 pb-1">
+                      <button type="button" role="switch" aria-checked={showImages} aria-keyshortcuts="F8" onClick={toggleImages} className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700">
+                        {showImages ? <ImageIcon size={14} /> : <ImageOff size={14} />}{showImages ? "Images on" : "Images off"}<Kbd>F8</Kbd>
                       </button>
-                    ))}
+                      <button type="button" aria-keyshortcuts="F3" onClick={openQuickAdd} className="flex h-8 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100">
+                        <Plus size={14} />Quick add<Kbd>F3</Kbd>
+                      </button>
+                    </div>
                   </div>
 
                   {visibleProducts.length > 0 ? (
@@ -1612,8 +1717,8 @@ export default function Home() {
                       {visibleProducts.map((product) => {
                         const unavailable = product.stock <= (cart[product.id] ?? 0);
                         return (
-                          <button type="button" key={product.id} data-product-card disabled={unavailable} onClick={() => addToCart(product)} className={`group relative rounded-2xl border border-slate-100 bg-white p-3 text-left shadow-[0_2px_10px_rgba(20,45,90,0.025)] transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 sm:p-4`}>
-                            <ProductArtwork product={product} className={`mb-3 aspect-[1.6/1] rounded-xl text-[42px] transition-transform group-hover:scale-[1.015]`} />
+                          <button type="button" key={product.id} data-product-card disabled={unavailable} onClick={() => addToCart(product)} className={`group relative rounded-2xl border border-slate-100 bg-white text-left shadow-[0_2px_10px_rgba(20,45,90,0.025)] transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 ${showImages ? "p-3 sm:p-4" : "px-3 py-2.5"}`}>
+                            {showImages && <ProductArtwork product={product} className={`mb-3 aspect-[1.6/1] rounded-xl text-[42px] transition-transform group-hover:scale-[1.015]`} />}
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-semibold text-slate-800">{product.name}</p>
@@ -1621,14 +1726,14 @@ export default function Home() {
                               </div>
                               <span className="shrink-0 text-sm font-bold text-blue-700">{money(product.price)}</span>
                             </div>
-                            <span className="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-full bg-white text-blue-600 opacity-0 shadow-sm transition group-hover:opacity-100"><Plus size={16} /></span>
+                            {showImages && <span className="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-full bg-white text-blue-600 opacity-0 shadow-sm transition group-hover:opacity-100"><Plus size={16} /></span>}
                           </button>
                         );
                       })}
                     </div>
                   ) : (
                     <div className="grid min-h-64 place-items-center rounded-2xl border border-dashed border-slate-200 bg-white text-center">
-                      <div><ShoppingBag size={28} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No products found</p><p className="mt-1 text-xs text-slate-400">Try another name or category.</p></div>
+                      <div><ShoppingBag size={28} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No products found</p><p className="mt-1 text-xs text-slate-400">Try another name or category, or sell it as a custom item.</p><button type="button" onClick={openQuickAdd} className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"><Plus size={14} /> Quick add custom item <Kbd>F3</Kbd></button></div>
                     </div>
                   )}
                 </section>
@@ -1650,11 +1755,14 @@ export default function Home() {
                     onChange={changeQuantity}
                     onCheckout={() => { setNotice(""); setShowMobileCart(false); setShowCheckoutDialog(true); }}
                     isProcessing={isLoading}
-                    onClear={() => { setCart({}); setWholesaleMode(false); }}
+                    onClear={clearOrder}
                     priceOf={unitPrice}
                     wholesale={wholesaleMode}
                     savings={wholesaleSavings}
                     onClose={() => setShowMobileCart(false)}
+                    customItems={customItems}
+                    onCustomChange={changeCustomQuantity}
+                    showImages={showImages}
                   />
                 </div>
                 <div className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-100 bg-white/95 px-4 py-3 shadow-[0_-4px_16px_rgba(20,45,90,0.06)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/95 md:hidden">
@@ -1738,7 +1846,7 @@ export default function Home() {
                 <label className="block text-sm font-medium text-slate-700">Stock<input required name="stock" type="number" min="0" step="1" placeholder="12" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               </div>
               <BarcodeField />
-              <label className="block text-sm font-medium text-slate-700">Category<select name="category" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50">{categories.filter((item) => item !== "All items").map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+              <CategoryField categories={productCategories} />
               <ProductImagePicker
                 selectedIcon={selectedProductIcon}
                 selectedImage={selectedProductImage}
@@ -1754,7 +1862,7 @@ export default function Home() {
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) setEditingProductPrices(null); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="edit-product-prices-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <div className="mb-5 flex items-start justify-between">
-              <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="edit-product-prices-title" className="mt-1 text-xl font-semibold">Update prices &amp; barcode</h2><p className="mt-1 text-sm text-slate-500">{editingProductPrices.name}</p></div>
+              <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="edit-product-prices-title" className="mt-1 text-xl font-semibold">Edit product details</h2><p className="mt-1 text-sm text-slate-500">{editingProductPrices.name}</p></div>
               <button type="button" aria-label="Close price editor" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
             </div>
             <form onSubmit={saveProductPrices} className="space-y-4">
@@ -1762,6 +1870,7 @@ export default function Home() {
               <label className="block text-sm font-medium text-slate-700">Wholesale price (₱)<input required name="wholesale_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.wholesalePrice} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" defaultValue={editingProductPrices.price} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <BarcodeField defaultValue={editingProductPrices.barcode ?? ""} />
+              <CategoryField categories={productCategories} defaultValue={editingProductPrices.category} />
               <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={() => setEditingProductPrices(null)} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel <Kbd>Esc</Kbd></button><button disabled={isLoading} type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : <>Save <Kbd>Enter</Kbd></>}</button></div>
             </form>
           </div>
@@ -1780,6 +1889,7 @@ export default function Home() {
           </div>
         </div>
       )}
+      {quickAdd && <QuickAddDialog initial={quickAdd} onAdd={addCustomItem} onClose={() => setQuickAdd(null)} />}
       {restockProduct && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) setRestockProduct(null); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="restock-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
@@ -1987,6 +2097,14 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
             <p className="mt-2 text-xs leading-5 text-slate-500">Admins can open Inventory to restock an item or use its Image action to upload or change its custom photo. New products can also be given a custom image when added.</p>
           </details>
           <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">How do I sell something that isn’t in my products?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Scan or type it and press Enter — if it isn’t found, the Quick add window opens. You can also press F3 or click Quick add. Enter a description, quantity, and either the price each or the total amount. Custom items don’t change stock and have no recorded cost, so orders containing them are left out of the estimated-profit figures.</p>
+          </details>
+          <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">How do categories work?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Categories come from your products. Admins create one by typing a new category name when adding or editing a product, or by including it in the category column of an import. Only categories that have products appear on Point of sale.</p>
+          </details>
+          <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I sell at wholesale prices?</summary>
             <p className="mt-2 text-xs leading-5 text-slate-500">In the checkout dialog, turn on Wholesale pricing (or press F4). Each item is charged its wholesale price; items without one are charged retail and listed in the dialog. Wholesale switches off after the sale or when the order is cleared, and wholesale orders are tagged in Orders.</p>
           </details>
@@ -2013,7 +2131,9 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
               ["Enter", "Add the scanned or only matching item · confirm a dialog"],
               ["↑ ↓ ← →", "Move between products; Enter adds the focused one"],
               ["F2", "Focus the product search"],
+              ["F3", "Quick add a custom item that isn’t in your products"],
               ["F4", "Continue to payment"],
+              ["F8", "Turn product images on or off"],
               ["F1 / F2 / F3", "In checkout: Cash / E-Wallet / Card"],
               ["F4 in checkout", "Turn wholesale pricing on or off"],
               ["F-keys in pop-ups", "Choose a pop-up’s options (shown on each option)"],
@@ -2051,6 +2171,86 @@ function ProductArtwork({ product, className = "" }: { product: Product; classNa
         <span aria-hidden="true">{product.emoji}</span>
       )}
     </div>
+  );
+}
+
+// Sell something that isn't in the product catalog. Price (each) and amount
+// (line total) stay in sync through the quantity, so either can be entered.
+function QuickAddDialog({ initial, onAdd, onClose }: {
+  initial: { quantity: number; description: string; note: string };
+  onAdd: (item: Omit<CustomItem, "id">) => void;
+  onClose: () => void;
+}) {
+  const [quantity, setQuantity] = useState(String(initial.quantity));
+  const [description, setDescription] = useState(initial.description);
+  const [price, setPrice] = useState("");
+  const [amount, setAmount] = useState("");
+  const [error, setError] = useState("");
+  const inputClass = "mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950";
+
+  function updateFrom(next: { quantity?: string; price?: string; amount?: string }) {
+    const nextQuantity = next.quantity ?? quantity;
+    const count = Number(nextQuantity);
+    const validCount = Number.isInteger(count) && count > 0;
+    if (next.quantity !== undefined) setQuantity(next.quantity);
+    if (next.amount !== undefined) {
+      setAmount(next.amount);
+      setPrice(next.amount && validCount ? (Number(next.amount) / count).toFixed(2) : "");
+      return;
+    }
+    const nextPrice = next.price ?? price;
+    if (next.price !== undefined) setPrice(next.price);
+    setAmount(nextPrice && validCount ? (Number(nextPrice) * count).toFixed(2) : "");
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const count = Number(quantity);
+    const unitPrice = Math.round(Number(price) * 100) / 100;
+    const name = description.trim();
+    if (!Number.isInteger(count) || count < 1 || count > 9999) return setError("Enter a whole-number quantity from 1 to 9,999.");
+    if (!name || name.length > 120) return setError("Enter a description of up to 120 characters.");
+    if (!Number.isFinite(unitPrice) || unitPrice <= 0 || unitPrice > 999999.99) return setError("Enter a price or amount above ₱0.");
+    onAdd({ description: name, quantity: count, unitPrice });
+  }
+
+  const lineTotal = Math.round(Number(price) * 100) / 100 * (Number(quantity) || 0);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="quick-add-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
+        <div className="mb-5 flex items-start justify-between">
+          <div><p className="text-xs font-semibold text-blue-600">CUSTOM ITEM</p><h2 id="quick-add-title" className="mt-1 text-xl font-semibold">Quick add</h2><p className="mt-1 text-sm text-slate-500">{initial.note ? `${initial.note} ` : ""}Sell it as a one-off item. Stock isn’t tracked for custom items.</p></div>
+          <button type="button" aria-label="Close quick add (Esc)" onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
+        </div>
+        <form noValidate onSubmit={submit} className="space-y-4">
+          <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Description<input autoFocus={!initial.description} required maxLength={120} value={description} onChange={(event) => setDescription(event.currentTarget.value)} placeholder="e.g. Ice (1 bag)" className={inputClass} /></label>
+          <div className="grid grid-cols-3 gap-3">
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Quantity<input required type="number" min="1" max="9999" step="1" inputMode="numeric" value={quantity} onChange={(event) => updateFrom({ quantity: event.currentTarget.value })} className={inputClass} /></label>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Price (₱)<input autoFocus={!!initial.description} required type="number" min="0.01" step="0.01" inputMode="decimal" value={price} onChange={(event) => updateFrom({ price: event.currentTarget.value })} placeholder="each" className={inputClass} /></label>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Amount (₱)<input type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(event) => updateFrom({ amount: event.currentTarget.value })} placeholder="total" className={inputClass} /></label>
+          </div>
+          <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800"><span>Adds to order</span><span className="font-semibold text-slate-800 dark:text-slate-100">{Number(quantity) || 0} × {money(Math.round(Number(price) * 100) / 100 || 0)} = {money(lineTotal || 0)}</span></div>
+          {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
+          <div className="flex gap-3 pt-1">
+            <button type="button" onClick={onClose} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button>
+            <button type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add to order <Kbd>Enter</Kbd></button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// Free-text category with the existing ones as suggestions: pick one, or type
+// a new name to create a category.
+function CategoryField({ categories, defaultValue = "" }: { categories: string[]; defaultValue?: string }) {
+  const listId = useId();
+  return (
+    <label className="block text-sm font-medium text-slate-700">Category
+      <input required name="category" list={listId} maxLength={80} defaultValue={defaultValue} autoComplete="off" placeholder={categories.length ? "Pick one or type a new category" : "e.g. Snacks"} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" />
+      <datalist id={listId}>{categories.map((item) => <option key={item} value={item} />)}</datalist>
+      <span className="mt-1 block text-[11px] font-normal text-slate-400">Typing a new name creates that category.</span>
+    </label>
   );
 }
 
@@ -2160,7 +2360,7 @@ function ProductImagePicker({
   );
 }
 
-function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing, priceOf, wholesale, savings, onClose }: {
+function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing, priceOf, wholesale, savings, onClose, customItems, onCustomChange, showImages }: {
   items: Product[];
   quantities: Record<string, number>;
   count: number;
@@ -2174,7 +2374,11 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
   wholesale: boolean;
   savings: number;
   onClose: () => void;
+  customItems: CustomItem[];
+  onCustomChange: (id: string, difference: number) => void;
+  showImages: boolean;
 }) {
+  const stepButton = "grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600";
   return (
     <aside aria-label="Current order" className="flex h-full flex-col overflow-hidden border-l border-slate-100 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 md:rounded-2xl md:border md:shadow-[0_3px_16px_rgba(20,45,90,0.035)]">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
@@ -2184,10 +2388,14 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
       </div>
       <div className="flex shrink-0 items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px] dark:bg-slate-800/60"><span className="text-slate-500">Customer</span><button type="button" className="flex items-center gap-1 font-semibold text-blue-700">Walk-in customer <ChevronDown size={13} /></button></div>
       <div className="min-h-[120px] flex-1 overflow-y-auto px-5">
-        {items.length > 0 ? <ul className="divide-y divide-slate-100">{items.map((product) => <li key={product.id} className="flex items-center gap-3 py-4">
-          <ProductArtwork product={product} className="h-11 w-11 rounded-xl text-xl" />
+        {items.length + customItems.length > 0 ? <ul className="divide-y divide-slate-100 dark:divide-slate-800">{items.map((product) => <li key={product.id} className={`flex items-center gap-3 ${showImages ? "py-4" : "py-3"}`}>
+          {showImages && <ProductArtwork product={product} className="h-11 w-11 rounded-xl text-xl" />}
           <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-1 text-[11px] text-slate-400">{money(priceOf(product))} each{priceOf(product) !== product.price && <span className="ml-1.5 line-through">{money(product.price)}</span>}</p><div className="mt-2 flex items-center gap-2"><button type="button" aria-label={`Remove one ${product.name}`} onClick={() => onChange(product.id, -1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Minus size={12} /></button><span className="w-4 text-center text-xs font-semibold">{quantities[product.id]}</span><button type="button" aria-label={`Add one ${product.name}`} onClick={() => onChange(product.id, 1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Plus size={12} /></button></div></div>
           <div className="flex h-full flex-col items-end justify-between gap-4"><button type="button" aria-label={`Remove ${product.name} from order`} onClick={() => onChange(product.id, -quantities[product.id])} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button><span className="text-xs font-semibold">{money(priceOf(product) * quantities[product.id])}</span></div>
+        </li>)}{customItems.map((item) => <li key={item.id} className={`flex items-center gap-3 ${showImages ? "py-4" : "py-3"}`}>
+          {showImages && <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 dark:bg-slate-800"><PenLine size={18} /></div>}
+          <div className="min-w-0 flex-1"><p className="flex items-center gap-1.5 text-xs font-semibold"><span className="truncate">{item.description}</span><span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-800">Custom</span></p><p className="mt-1 text-[11px] text-slate-400">{money(item.unitPrice)} each</p><div className="mt-2 flex items-center gap-2"><button type="button" aria-label={`Remove one ${item.description}`} onClick={() => onCustomChange(item.id, -1)} className={stepButton}><Minus size={12} /></button><span className="min-w-4 text-center text-xs font-semibold">{item.quantity}</span><button type="button" aria-label={`Add one ${item.description}`} onClick={() => onCustomChange(item.id, 1)} className={stepButton}><Plus size={12} /></button></div></div>
+          <div className="flex h-full flex-col items-end justify-between gap-4"><button type="button" aria-label={`Remove ${item.description} from order`} onClick={() => onCustomChange(item.id, -item.quantity)} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button><span className="text-xs font-semibold">{money(item.unitPrice * item.quantity)}</span></div>
         </li>)}</ul> : <div className="flex min-h-[180px] flex-col items-center justify-center text-center"><div className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-500"><ShoppingCart size={20} /></div><p className="mt-3 text-xs font-semibold text-slate-700">Your order is empty</p><p className="mt-1 text-[11px] text-slate-400">Add a product to get started.</p></div>}
       </div>
       <div className="shrink-0 border-t border-slate-100 px-5 py-4 dark:border-slate-800">
@@ -2219,7 +2427,7 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
           <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><PackagePlus size={16} /> Add product</button>
         </div>
       </div>
-      <p className="mb-4 text-xs text-slate-400">Import CSV or JSON with <code className="rounded bg-slate-100 px-1 py-0.5">name, category, cost_price, wholesale_price, retail_price, stock</code> fields, plus an optional <code className="rounded bg-slate-100 px-1 py-0.5">barcode</code>. Older imports with <code className="rounded bg-slate-100 px-1 py-0.5">price</code> remain supported.</p>
+      <p className="mb-4 text-xs text-slate-400">Import CSV or JSON with <code className="rounded bg-slate-100 px-1 py-0.5">name, category, cost_price, wholesale_price, retail_price, stock</code> fields, plus an optional <code className="rounded bg-slate-100 px-1 py-0.5">barcode</code>. New category names in the file become new categories. Older imports with <code className="rounded bg-slate-100 px-1 py-0.5">price</code> remain supported.</p>
       <div className="mb-5 grid gap-3 sm:grid-cols-3">
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Total products</p><p className="mt-2 text-2xl font-semibold">{products.length}</p></div>
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Units in stock</p><p className="mt-2 text-2xl font-semibold">{products.reduce((sum, product) => sum + product.stock, 0)}</p></div>
@@ -2227,7 +2435,7 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditPrices(product)} aria-label={`Edit prices and barcode for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><CircleDollarSign size={14} /> Prices &amp; barcode</button><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditPrices(product)} aria-label={`Edit prices, barcode and category for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><CircleDollarSign size={14} /> Edit details</button><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
       </div>
     </section>
   );
