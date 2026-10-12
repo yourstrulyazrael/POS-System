@@ -412,6 +412,8 @@ type ImportPreview = {
   products: (ImportedProduct & { sourceRow: number; isUpdate: boolean })[];
   errors: string[];
   newCategories: string[];
+  // Active products the file doesn't include (removed if imported as a master list).
+  removable: string[];
 };
 
 function validateImportedProducts(records: RawProductRecord[]) {
@@ -2202,13 +2204,16 @@ export default function Home() {
       }
       return { ...row, category: productCategory, isUpdate: existingNames.has(row.name) };
     });
-    return { fileName: file.name, products: prepared, errors, newCategories };
+    const fileNames = new Set(rows.map((row) => row.name));
+    const removable = products.filter((product) => !fileNames.has(product.name)).map((product) => product.name).sort((a, b) => a.localeCompare(b));
+    return { fileName: file.name, products: prepared, errors, newCategories, removable };
   }
 
   // Step 2: save. Rows are upserted by product name. Rows are grouped by which
   // optional columns they include: a bulk upsert fills columns missing from a
   // row with NULL, which would fail or overwrite a value already set.
-  async function importProducts(preview: ImportPreview) {
+  async function importProducts(preview: ImportPreview, masterList = false) {
+    if (masterList) return importMasterList(preview);
     setIsImporting(true);
     try {
       const groups = new Map<string, ImportedProduct[]>();
@@ -2242,6 +2247,47 @@ export default function Home() {
       }
     } catch (error) {
       setNotice(productSaveError(error, "Unable to import products."));
+    } finally {
+      setIsImporting(false);
+    }
+  }
+
+  // Master list: the file replaces the whole product list. Done by the
+  // database in one transaction (remove products not in the file, then add or
+  // update the rest), so a failure changes nothing. Removed products are
+  // hidden, not deleted, so past orders keep them.
+  async function importMasterList(preview: ImportPreview) {
+    setIsImporting(true);
+    try {
+      const rows = preview.products.map((product) => ({
+        name: product.name,
+        category: product.category,
+        price: product.price,
+        stock: product.stock,
+        image_icon: product.image_icon,
+        ...(product.cost_price !== undefined ? { cost_price: product.cost_price } : {}),
+        ...(product.wholesale_price !== undefined ? { wholesale_price: product.wholesale_price } : {}),
+        ...(product.barcode ? { barcode: product.barcode } : {}),
+      }));
+      const { data, error } = await createClient().rpc("import_master_product_list", { p_rows: rows }).single();
+      if (error) {
+        if (error.code === "PGRST202" || error.code === "42883") {
+          throw new Error("Master list import needs the latest database update. Run npx supabase db push (migration 202610130001_master_product_list.sql), then retry.");
+        }
+        throw error;
+      }
+      const imported = data && typeof data === "object" && "imported" in data ? Number(data.imported) : preview.products.length;
+      const removed = data && typeof data === "object" && "removed" in data ? Number(data.removed) : 0;
+      setShowImport(false);
+      setCart({});
+      setNotice(`Master list applied successfully: ${imported} product${imported === 1 ? "" : "s"} imported${removed ? `, ${removed} not on the list removed` : ""}.`);
+      try {
+        await refreshWorkspace();
+      } catch (refreshError) {
+        setNotice(`The master list was applied, but the catalog could not refresh: ${refreshError instanceof Error ? refreshError.message : "Unknown error"}`);
+      }
+    } catch (error) {
+      setNotice(productSaveError(error, "Unable to apply the master list."));
     } finally {
       setIsImporting(false);
     }
@@ -2784,7 +2830,7 @@ export default function Home() {
           </div>
         </div>
       )}
-      {showImport && isAdmin && <ImportProductsDialog prepare={prepareImport} onImport={(preview) => void importProducts(preview)} onClose={() => setShowImport(false)} isImporting={isImporting} />}
+      {showImport && isAdmin && <ImportProductsDialog prepare={prepareImport} onImport={(preview, masterList) => void importProducts(preview, masterList)} onClose={() => setShowImport(false)} isImporting={isImporting} />}
       {restockProduct && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) setRestockProduct(null); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="restock-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
@@ -3316,7 +3362,7 @@ function exportInventoryPdf(items: Product[]) {
 // change, then import. Nothing is saved until Import is pressed.
 function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
   prepare: (file: File) => Promise<ImportPreview>;
-  onImport: (preview: ImportPreview) => void;
+  onImport: (preview: ImportPreview, masterList: boolean) => void;
   onClose: () => void;
   isImporting: boolean;
 }) {
@@ -3325,7 +3371,10 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
   const [error, setError] = useState("");
   const [isReading, setIsReading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  useFunctionKeys({ F1: () => fileInputRef.current?.click(), F2: downloadImportTemplate }, !isImporting);
+  // Master list: the file replaces the whole product list (products not in it are removed).
+  const [masterList, setMasterList] = useState(false);
+  const [acknowledged, setAcknowledged] = useState(false);
+  useFunctionKeys({ F1: () => fileInputRef.current?.click(), F2: downloadImportTemplate, F3: () => { setMasterList((current) => !current); setAcknowledged(false); } }, !isImporting);
   const submitRef = useRef<() => void>(() => {});
   useEffect(() => {
     // Enter imports from anywhere in the dialog except a focused button/link,
@@ -3346,6 +3395,7 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
     setPreview(null);
     try {
       setPreview(await prepare(file));
+      setAcknowledged(false);
     } catch (caughtError) {
       setError(caughtError instanceof Error ? caughtError.message : "Unable to read that file.");
     } finally {
@@ -3355,9 +3405,10 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
 
   const newCount = preview?.products.filter((product) => !product.isUpdate).length ?? 0;
   const updateCount = (preview?.products.length ?? 0) - newCount;
-  const canImport = !!preview && preview.products.length > 0 && preview.errors.length === 0 && !isImporting;
+  const needsAcknowledgement = masterList && (preview?.removable.length ?? 0) > 0;
+  const canImport = !!preview && preview.products.length > 0 && preview.errors.length === 0 && !isImporting && (!needsAcknowledgement || acknowledged);
   useEffect(() => {
-    submitRef.current = () => { if (canImport && preview) onImport(preview); };
+    submitRef.current = () => { if (canImport && preview) onImport(preview, masterList); };
   });
 
   return (
@@ -3369,7 +3420,7 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
         </div>
         <form
           className="flex min-h-0 flex-1 flex-col"
-          onSubmit={(event) => { event.preventDefault(); if (canImport && preview) onImport(preview); }}
+          onSubmit={(event) => { event.preventDefault(); if (canImport && preview) onImport(preview, masterList); }}
         >
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6 pt-4">
             <label
@@ -3395,7 +3446,41 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
               <button type="button" onClick={downloadImportTemplate} className="inline-flex items-center gap-1.5 font-semibold text-emerald-700 hover:text-emerald-800"><Download size={13} /> Excel template <Kbd>F2</Kbd></button>
             </div>
 
+            <button
+              type="button"
+              role="switch"
+              aria-checked={masterList}
+              aria-keyshortcuts="F3"
+              onClick={() => { setMasterList((current) => !current); setAcknowledged(false); }}
+              className={`flex w-full items-center gap-3 rounded-xl border p-3 text-left ${masterList ? "border-red-200 bg-red-50/70 dark:border-red-900 dark:bg-red-950/40" : "border-slate-200 dark:border-slate-700"}`}
+            >
+              <span className={`relative h-5 w-9 shrink-0 rounded-full transition ${masterList ? "bg-red-600" : "bg-slate-300"}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${masterList ? "left-[18px]" : "left-0.5"}`} /></span>
+              <span className="flex-1">
+                <span className="block text-sm font-semibold text-slate-700">Master list</span>
+                <span className="block text-[11px] leading-4 text-slate-500">{masterList ? "This file becomes the complete product list: products not in it are removed from POS and Inventory." : "Off: products in the file are added or updated; everything else stays."}</span>
+              </span>
+              <Kbd className="text-slate-500">F3</Kbd>
+            </button>
+
             {error && <div role="alert" className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+
+            {preview && masterList && preview.errors.length === 0 && preview.products.length > 0 && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+                {preview.removable.length === 0 ? (
+                  <p>Every current product is in this file, so nothing will be removed.</p>
+                ) : (
+                  <>
+                    <p className="font-semibold">{preview.removable.length} current product{preview.removable.length === 1 ? " is" : "s are"} not in this file and will be removed:</p>
+                    <p className="mt-1.5 max-h-24 overflow-y-auto leading-5">{preview.removable.slice(0, 200).join(", ")}{preview.removable.length > 200 ? `, and ${preview.removable.length - 200} more` : ""}</p>
+                    <p className="mt-1.5 text-[11px] leading-4 opacity-80">Removed products disappear from POS and Inventory, but past orders and reports keep them. Importing them again later brings them back.</p>
+                    <label className="mt-2.5 flex items-center gap-2 font-semibold">
+                      <input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.currentTarget.checked)} className="h-4 w-4 accent-red-600" />
+                      I understand {preview.removable.length} product{preview.removable.length === 1 ? "" : "s"} will be removed
+                    </label>
+                  </>
+                )}
+              </div>
+            )}
 
             {preview && (
               <>
@@ -3437,7 +3522,7 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
           </div>
           <div className="flex gap-3 border-t border-slate-100 p-6 pt-4 dark:border-slate-800">
             <button type="button" disabled={isImporting} onClick={onClose} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700">Cancel <Kbd>Esc</Kbd></button>
-            <button type="submit" disabled={!canImport} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{isImporting ? "Importing…" : <>Import {preview?.products.length ? `${preview.products.length} product${preview.products.length === 1 ? "" : "s"}` : ""} <Kbd>Enter</Kbd></>}</button>
+            <button type="submit" disabled={!canImport} className={`flex h-11 flex-1 items-center justify-center gap-2 rounded-lg text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 ${masterList ? "bg-red-600 hover:bg-red-700" : "bg-blue-600 hover:bg-blue-700"}`}>{isImporting ? "Importing…" : <>{masterList ? "Replace product list" : "Import"} {preview?.products.length ? `(${preview.products.length} product${preview.products.length === 1 ? "" : "s"})` : ""} <Kbd>Enter</Kbd></>}</button>
           </div>
         </form>
       </div>
