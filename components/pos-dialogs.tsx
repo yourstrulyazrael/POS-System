@@ -393,10 +393,10 @@ export function HardwareSettingsCard({ settings, onChange, onTestPrint, onTestDr
 
 // Shown once a new version has downloaded. Restarting is the cashier's
 // choice; otherwise it installs the next time the app is closed.
-export function UpdateReadyBar({ version, busy, onRestart }: { version: string | null; busy: boolean; onRestart: () => void }) {
+export function UpdateReadyBar({ version, busy, onRestart, testFeed = null }: { version: string | null; busy: boolean; onRestart: () => void; testFeed?: string | null }) {
   return (
     <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white">
-      <span>Clover POS {version ? `v${version}` : "update"} is ready. It installs when you close the app, or restart now (about 10 seconds).</span>
+      <span>{testFeed && <span className="mr-2 rounded bg-amber-300 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-950">Test update</span>}Clover POS {version ? `v${version}` : "update"} is ready. It installs when you close the app, or restart now (about 10 seconds).</span>
       <button type="button" onClick={onRestart} disabled={busy} className="h-6 rounded-md bg-white px-3 text-emerald-700 hover:bg-emerald-50 disabled:opacity-60">{busy ? "Restarting…" : "Restart to update"}</button>
     </div>
   );
@@ -423,7 +423,7 @@ export function UpdatesCard({ status, onCheck, onInstall }: {
   return (
     <div className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-start gap-3"><RotateCcw size={18} className="mt-0.5 text-blue-600" /><div><h2 className="text-sm font-semibold">App updates</h2><p className="mt-1 text-xs leading-5 text-slate-500">Installed version: {status?.currentVersion ? `v${status.currentVersion}` : "—"} · {describe()}</p></div></div>
+        <div className="flex items-start gap-3"><RotateCcw size={18} className="mt-0.5 text-blue-600" /><div><h2 className="text-sm font-semibold">App updates</h2><p className="mt-1 text-xs leading-5 text-slate-500">Installed version: {status?.currentVersion ? `v${status.currentVersion}` : "—"} · {describe()}</p>{status?.testFeed && <p className="mt-1.5 inline-flex rounded-md bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-800 dark:bg-amber-950/50 dark:text-amber-200">Test mode: updates come from {status.testFeed} (npm run update:test), not GitHub.</p>}</div></div>
         {status?.state === "ready" ? (
           <button type="button" onClick={onInstall} className="h-9 rounded-lg bg-emerald-600 px-3 text-xs font-semibold text-white hover:bg-emerald-700">Restart to update</button>
         ) : (

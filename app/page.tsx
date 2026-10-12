@@ -26,6 +26,7 @@ import {
   ImageIcon,
   Info,
   KeyRound,
+  LayoutGrid,
   ImageOff,
   PenLine,
   Printer,
@@ -64,9 +65,11 @@ import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
+import { defaultPosLayout, loadPosLayout, normalizeLayout, savePosLayout, type PosLayout } from "@/lib/pos-layout";
+import { CartResizeHandle, PosLayoutPanel } from "@/components/pos-layout-panel";
 import { CashCountDialog, DrawerStatusButton, HardwareSettingsCard, OpenDrawerDialog, ReconnectBanner, RefundDialog, RefundIcon, StoreDetailsCard, UpdateReadyBar, UpdatesCard, VoidDialog, VoidIcon } from "@/components/pos-dialogs";
 import { buildProductsXlsx, buildTemplateXlsx, importColumns, readProductFile, type RawProductRecord } from "@/lib/product-import";
-import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
 import Image from "next/image";
 
@@ -541,6 +544,11 @@ export default function Home() {
   const [printThisSale, setPrintThisSale] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  // POS screen layout for this till (tile size, order width, text size).
+  const [posLayout, setPosLayout] = useState<PosLayout>(defaultPosLayout);
+  const [showLayoutPanel, setShowLayoutPanel] = useState(false);
+  const headerRef = useRef<HTMLElement>(null);
+  const cartWrapperRef = useRef<HTMLDivElement>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [showAddEmployee, setShowAddEmployee] = useState(false);
@@ -713,6 +721,44 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [notice, noticeIsSuccess, showCheckoutDialog]);
 
+  // The top bar grows with its banners (offline, reconnect, update ready).
+  // Publish its real height so the sticky current order always fits below it.
+  useEffect(() => {
+    const header = headerRef.current;
+    if (!header) return;
+    const publish = () => document.documentElement.style.setProperty("--pos-header-height", `${Math.ceil(header.getBoundingClientRect().height)}px`);
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [signedIn]);
+
+  // The current order is sticky: pinned under the top bar once scrolled, but
+  // lower down at the top of the page (below notices and prompts). Size it
+  // from where it actually is, so its Pay button is always on screen.
+  useEffect(() => {
+    if (!signedIn || activePage !== "pos") return;
+    let frame = 0;
+    const measure = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const wrapper = cartWrapperRef.current;
+        if (wrapper) wrapper.style.setProperty("--cart-top", `${Math.max(0, Math.round(wrapper.getBoundingClientRect().top))}px`);
+      });
+    };
+    measure();
+    window.addEventListener("scroll", measure, { passive: true });
+    window.addEventListener("resize", measure);
+    const observer = new ResizeObserver(measure); // notices/banners appearing move it
+    observer.observe(document.body);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", measure);
+      window.removeEventListener("resize", measure);
+      observer.disconnect();
+    };
+  }, [activePage, signedIn]);
+
   // Each checkout starts from this till's "print receipts by default" setting.
   useEffect(() => {
     if (showCheckoutDialog) setPrintThisSale(hardware.autoPrint);
@@ -724,6 +770,7 @@ export default function Home() {
   // This till's printer/drawer settings and its open cash drawer session.
   useEffect(() => {
     setHardware(loadHardwareSettings());
+    setPosLayout(loadPosLayout());
     void readCurrentSession().then(setCashSession).catch(() => undefined);
     void readSessionOutbox().then((outbox) => setSessionOutboxCount(outbox.length)).catch(() => undefined);
   }, []);
@@ -1057,6 +1104,7 @@ export default function Home() {
     else if (confirmAction) setConfirmAction(null);
     else if (passwordEmployee) setPasswordEmployee(null);
     else if (showSyncPanel) setShowSyncPanel(false);
+    else if (showLayoutPanel) setShowLayoutPanel(false);
     else if (showOpenDrawer) setShowOpenDrawer(false);
     else if (showCashCount) setShowCashCount(false);
     else if (voidTarget) setVoidTarget(null);
@@ -1304,6 +1352,12 @@ export default function Home() {
     } catch (error) {
       setNotice(`The cash drawer didn’t open: ${error instanceof Error ? error.message : "drawer error"}`);
     }
+  }
+
+  function updateLayout(layout: PosLayout) {
+    const normalized = normalizeLayout(layout);
+    setPosLayout(normalized);
+    savePosLayout(normalized);
   }
 
   // ---------- live updates (desktop app) ----------
@@ -2299,8 +2353,8 @@ export default function Home() {
     <main className={`min-h-screen bg-[#f5f8fd] text-slate-900 dark:bg-slate-950 dark:text-slate-100 ${currentView === "analytics" ? "analytics-report-print-mode" : ""}`}>
       <div className="flex min-h-screen">
         <div className="min-w-0 flex-1">
-          <header className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
-            {updateStatus?.state === "ready" && <UpdateReadyBar version={updateStatus.version} busy={installingUpdate} onRestart={restartToUpdate} />}
+          <header ref={headerRef} className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
+            {updateStatus?.state === "ready" && <UpdateReadyBar version={updateStatus.version} busy={installingUpdate} onRestart={restartToUpdate} testFeed={updateStatus.testFeed} />}
             {offlineSession && isOnline && <ReconnectBanner email={accountEmail} onReconnect={reconnectOnline} />}
             {!connected && <OfflineBanner signedIn waiting={waitingToSync} />}
             <div className="flex h-[72px] items-center gap-3 px-4 sm:px-7 xl:px-9">
@@ -2461,8 +2515,9 @@ export default function Home() {
             ) : currentView === "shifts" ? (
               <ShiftHistoryView isAdmin={isAdmin} />
             ) : (
-              <div className="grid items-start gap-5 pb-20 md:grid-cols-[minmax(0,1fr)_300px] md:pb-0 xl:grid-cols-[minmax(0,1fr)_340px] xl:gap-6">
-                <section className="min-w-0">
+              <div className="grid items-start gap-5 pb-20 md:grid-cols-[minmax(0,1fr)_min(var(--cart-width),50vw)] md:pb-0 xl:gap-6" style={{ "--cart-width": `${posLayout.cartWidth}px` } as CSSProperties}>
+                {/* Text size: CSS zoom scales text and controls together (many sizes are in px). */}
+                <section className="min-w-0" style={{ zoom: posLayout.textScale / 100 }}>
                   <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
                     <div>
                       <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">New sale</span></div>
@@ -2513,6 +2568,7 @@ export default function Home() {
                       </div>
                     )}
                     <div className="ml-auto flex shrink-0 gap-2 pb-1">
+                      <button type="button" aria-pressed={showLayoutPanel} onClick={() => setShowLayoutPanel((current) => !current)} className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 aria-pressed:border-blue-300 aria-pressed:text-blue-700"><LayoutGrid size={14} />Customize</button>
                       <button type="button" role="switch" aria-checked={showImages} aria-keyshortcuts="F8" onClick={toggleImages} className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700">
                         {showImages ? <ImageIcon size={14} /> : <ImageOff size={14} />}{showImages ? "Images on" : "Images off"}<Kbd>F8</Kbd>
                       </button>
@@ -2523,7 +2579,7 @@ export default function Home() {
                   </div>
 
                   {visibleProducts.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4" onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
+                    <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(${posLayout.tileSize}px, 100%), 1fr))` }} onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
                       {visibleProducts.map((product) => {
                         const unavailable = product.stock <= (cart[product.id] ?? 0);
                         return (
@@ -2554,9 +2610,12 @@ export default function Home() {
                 {showMobileCart && <div aria-hidden="true" onClick={() => setShowMobileCart(false)} className="fixed inset-0 z-40 bg-slate-950/40 md:hidden" />}
                 <div
                   id="cart-panel"
-                  className={`fixed inset-y-0 right-0 z-50 w-[min(380px,88vw)] transition-[transform,visibility] duration-200 md:visible md:sticky md:bottom-auto md:right-auto md:z-auto ${connected ? "md:top-[88px] md:h-[calc(100dvh-104px)]" : "md:top-[120px] md:h-[calc(100dvh-136px)]"} md:w-auto md:translate-x-0 md:transition-none ${showMobileCart ? "visible translate-x-0" : "invisible translate-x-full"}`}
+                  ref={cartWrapperRef}
+                  className={`fixed inset-y-0 right-0 z-50 w-[min(var(--cart-width),88vw)] transition-[transform,visibility] duration-200 md:visible md:sticky md:bottom-auto md:right-auto md:z-auto md:top-[calc(var(--pos-header-height,72px)+16px)] md:h-[calc(100dvh-var(--cart-top,88px)-16px)] md:w-auto md:translate-x-0 md:transition-none ${showMobileCart ? "visible translate-x-0" : "invisible translate-x-full"}`}
                 >
+                  <CartResizeHandle width={posLayout.cartWidth} onResize={(cartWidth) => updateLayout({ ...posLayout, cartWidth })} />
                   <CartPanel
+                    textScale={posLayout.textScale}
                     items={cartItems}
                     quantities={cart}
                     count={itemCount}
@@ -2710,6 +2769,7 @@ export default function Home() {
       {showCashCount && cashSession && <CashCountDialog session={cashSession} onConfirm={finishDrawerSession} onClose={() => setShowCashCount(false)} onOpenDrawer={() => void openDrawer(true)} />}
       {voidTarget && <VoidDialog order={voidTarget} onConfirm={(reason, printSlip) => voidSale(voidTarget, reason, printSlip)} onClose={() => setVoidTarget(null)} />}
       {refundTarget && <RefundDialog order={refundTarget} onConfirm={(refund) => refundSale(refundTarget, refund)} onClose={() => setRefundTarget(null)} />}
+      {showLayoutPanel && currentView === "pos" && <PosLayoutPanel layout={posLayout} onChange={updateLayout} onClose={() => setShowLayoutPanel(false)} />}
       {showSyncPanel && <SyncPanel sales={pendingOrders} isOnline={isOnline} isSyncing={isSyncing} currentUserId={userId} isAdmin={isAdmin} onSync={(retryFailed) => void syncPendingOrders({ retryFailed })} onClose={() => setShowSyncPanel(false)} />}
       {confirmAction && <ConfirmDialog action={confirmAction} isWorking={isLoading} onConfirm={() => void runConfirmAction()} onCancel={() => setConfirmAction(null)} />}
       {passwordEmployee && (
@@ -2942,6 +3002,10 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">What happens when the internet goes down?</summary>
             <p className="mt-2 text-xs leading-5 text-slate-500">Keep selling. If you were signed in, checkout keeps working with the products last loaded on this computer. Each sale is saved on this computer and syncs to the store database automatically when the connection returns; the cloud icon in the top bar shows how many are waiting. A sale is never recorded twice. Anyone who signed in online on this computer in the last 30 days can also sign in offline; when the connection returns, enter your password once in the blue bar to reconnect and sync. Voids, refunds, inventory and employee changes, and reports need a connection. If offline sales sold more than the recorded stock, admins see a “Recount needed” list in Inventory.</p>
+          </details>
+          <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">Can I change the size of the POS screen?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Yes. On Point of sale, click Customize: make the product tiles smaller (more per row) or larger, make the current order narrower or wider, and change the text size. You can also drag the left edge of the current order. The layout is saved on this computer; Reset puts it back.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I void a sale or give a refund?</summary>
@@ -3597,7 +3661,7 @@ function ProductImagePicker({
   );
 }
 
-function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing, priceOf, wholesale, savings, onClose, customItems, onCustomChange, showImages }: {
+function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing, priceOf, wholesale, savings, onClose, customItems, onCustomChange, showImages, textScale = 100 }: {
   items: Product[];
   quantities: Record<string, number>;
   count: number;
@@ -3614,10 +3678,11 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
   customItems: CustomItem[];
   onCustomChange: (id: string, difference: number) => void;
   showImages: boolean;
+  textScale?: number;
 }) {
   const stepButton = "grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600";
   return (
-    <aside aria-label="Current order" className="flex h-full flex-col overflow-hidden border-l border-slate-100 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 md:rounded-2xl md:border md:shadow-[0_3px_16px_rgba(20,45,90,0.035)]">
+    <aside aria-label="Current order" style={{ zoom: textScale / 100 }} className="flex h-full flex-col overflow-hidden border-l border-slate-100 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 md:rounded-2xl md:border md:shadow-[0_3px_16px_rgba(20,45,90,0.035)]">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
         <div><div className="flex items-center gap-2"><ShoppingCart size={17} className="text-blue-600" /><h2 className="text-sm font-semibold">Current order</h2></div><p className="mt-1 flex items-center gap-1.5 pl-[25px] text-[11px] text-slate-400">New sale{wholesale && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Wholesale</span>}</p></div>
         {count > 0 && <button type="button" onClick={onClear} aria-keyshortcuts="F9" className="ml-auto flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-red-500">Clear all <Kbd>F9</Kbd></button>}

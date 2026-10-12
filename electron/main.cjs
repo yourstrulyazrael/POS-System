@@ -159,7 +159,25 @@ function registerHardwareHandlers() {
 // next time the app is closed — never in the middle of a sale.
 
 const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
-let updateStatus = { state: "idle", version: null, percent: null, message: null };
+let updateStatus = { state: "idle", version: null, percent: null, message: null, testFeed: null };
+
+// Update testing: CLOVER_UPDATE_URL points the installed app at a local test
+// server (npm run update:test) instead of GitHub Releases. Only this
+// computer's loopback address is accepted, so it can never be aimed at an
+// outside server.
+function testUpdateFeed() {
+  const raw = process.env.CLOVER_UPDATE_URL;
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+    if ((url.protocol === "http:" || url.protocol === "https:") && loopback) return url.toString().replace(/\/?$/, "/");
+  } catch {
+    // fall through
+  }
+  console.warn("Ignoring CLOVER_UPDATE_URL: only http://127.0.0.1:<port>/ (this computer) is allowed.");
+  return null;
+}
 
 function setUpdateStatus(patch) {
   updateStatus = { ...updateStatus, ...patch };
@@ -176,6 +194,12 @@ function setupLiveUpdates() {
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.logger = null;
 
+  const testFeed = testUpdateFeed();
+  if (testFeed) {
+    autoUpdater.setFeedURL({ provider: "generic", url: testFeed });
+    updateStatus = { ...updateStatus, testFeed };
+  }
+
   autoUpdater.on("checking-for-update", () => setUpdateStatus({ state: "checking", message: null }));
   autoUpdater.on("update-not-available", () => setUpdateStatus({ state: "current", percent: null, message: null }));
   autoUpdater.on("update-available", (info) => setUpdateStatus({ state: "downloading", version: info.version, percent: 0, message: null }));
@@ -184,8 +208,9 @@ function setupLiveUpdates() {
   autoUpdater.on("error", (error) => setUpdateStatus({ state: "error", message: error?.message ? String(error.message).split("\n")[0].slice(0, 200) : "Update check failed." }));
 
   const check = () => autoUpdater.checkForUpdates().catch(() => undefined); // errors arrive via the "error" event
-  setTimeout(check, 15_000);
-  setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+  // Test mode checks right away and every minute, so a tester isn't kept waiting.
+  setTimeout(check, testFeed ? 3_000 : 15_000);
+  setInterval(check, testFeed ? 60_000 : UPDATE_CHECK_INTERVAL_MS);
 
   ipcMain.handle("pos:check-for-updates", async (event) => {
     if (!fromAppPage(event)) throw new Error("Not allowed.");

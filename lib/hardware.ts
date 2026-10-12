@@ -24,6 +24,7 @@ export type UpdateStatus = {
   percent: number | null;
   message: string | null;
   currentVersion?: string;
+  testFeed?: string | null; // set when testing against a local update server
 };
 
 type DesktopBridge = {

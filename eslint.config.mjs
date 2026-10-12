@@ -10,7 +10,7 @@ const compat = new FlatCompat({
 });
 
 const eslintConfig = [
-  { ignores: [".next/**", "out/**", "dist-desktop/**", "supabase/functions/**"] },
+  { ignores: [".next/**", "out/**", "dist-desktop/**", "dist-update-test/**", "supabase/functions/**"] },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
   // The Electron main process is CommonJS.
   { files: ["electron/**/*.cjs"], rules: { "@typescript-eslint/no-require-imports": "off" } },

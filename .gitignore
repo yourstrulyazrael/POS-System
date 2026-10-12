@@ -25,6 +25,7 @@
 
 # desktop installers (electron-builder output)
 /dist-desktop/
+/dist-update-test/
 
 # misc
 .DS_Store

@@ -13,7 +13,9 @@
     "desktop": "next build && electron .",
     "desktop:dev": "electron . --dev",
     "dist:win": "next build && electron-builder --win nsis",
-    "release:win": "next build && electron-builder --win nsis --publish always"
+    "release:win": "next build && electron-builder --win nsis --publish always",
+    "update:test": "node scripts/update-test.mjs build-and-serve",
+    "update:test-launch": "node scripts/update-test.mjs launch"
   },
   "build": {
     "appId": "co.clover.pos",
@@ -39,7 +41,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Clover POS"
+      "shortcutName": "Clover POS",
+      "artifactName": "Clover-POS-Setup-${version}.${ext}"
     },
     "publish": [
       {
