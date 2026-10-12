@@ -43,8 +43,8 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 import { AnalyticsReportsView } from "@/components/analytics-reports";
 import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
-import { useBarcodeScanner } from "@/lib/use-barcode-scanner";
-import { FormEvent, useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
+import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
 import Image from "next/image";
 
@@ -101,6 +101,7 @@ type OrderRow = {
 type Employee = { id: string; email: string; full_name: string; role: "employee" };
 type DashboardStats = { sales_total: number; orders_today: number; active_products: number; units_in_stock: number; active_employees: number };
 type SalesPeriod = "today" | "7days" | "30days";
+type Page = "dashboard" | "analytics" | "pos" | "inventory" | "orders" | "shifts" | "employees" | "account";
 
 const money = (amount: number) =>
   new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(amount);
@@ -297,6 +298,13 @@ function parseProductCsv(content: string) {
   return validateImportedProducts(records);
 }
 
+// A POS entry is "<quantity>/<barcode or name>" or just "<barcode or name>",
+// e.g. "24/4800016644290" adds 24 of that item.
+function parseSaleEntry(value: string) {
+  const match = /^\s*(\d+)\s*\/\s*(.*)$/.exec(value);
+  return match ? { quantity: Number(match[1]), term: match[2].trim() } : { quantity: null, term: value.trim() };
+}
+
 // Barcodes are stored as scanned: 1–64 printable ASCII characters, no spaces.
 // Returns null for an empty value and undefined for an invalid one.
 function normalizeBarcode(value: unknown) {
@@ -383,7 +391,7 @@ export default function Home() {
   const [readNotifications, setReadNotifications] = useState<string[]>([]);
   const [category, setCategory] = useState("All items");
   const [search, setSearch] = useState("");
-  const [activePage, setActivePage] = useState<"dashboard" | "analytics" | "pos" | "inventory" | "orders" | "shifts" | "employees" | "account">("pos");
+  const [activePage, setActivePage] = useState<Page>("pos");
   const [showAddProduct, setShowAddProduct] = useState(false);
   const [editingProductPrices, setEditingProductPrices] = useState<Product | null>(null);
   const [selectedProductIcon, setSelectedProductIcon] = useState("auto");
@@ -406,6 +414,8 @@ export default function Home() {
   const [isImporting, setIsImporting] = useState(false);
   const [restockProduct, setRestockProduct] = useState<Product | null>(null);
 
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const { quantity: entryQuantity, term: searchTerm } = parseSaleEntry(search);
   const categories = useMemo(
     () => ["All items", ...new Set([...sariSariCategories, ...products.map((product) => product.category)])],
     [products],
@@ -415,9 +425,9 @@ export default function Home() {
       products.filter(
         (product) =>
           (category === "All items" || product.category === category) &&
-          (product.name.toLowerCase().includes(search.toLowerCase()) || (!!search.trim() && product.barcode === search.trim())),
+          (product.name.toLowerCase().includes(searchTerm.toLowerCase()) || (!!searchTerm && product.barcode === searchTerm)),
       ),
-    [category, products, search],
+    [category, products, searchTerm],
   );
   const cartItems = products.filter((product) => cart[product.id]);
   const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0);
@@ -554,25 +564,147 @@ export default function Home() {
     setNotice("");
   }
 
-  function addScannedProduct(barcode: string) {
-    const product = products.find((item) => item.barcode === barcode);
-    if (!product) {
-      setNotice(`No product found for barcode ${barcode}.`);
+  function addProductQuantity(product: Product, quantity: number) {
+    const available = product.stock - (cart[product.id] ?? 0);
+    if (quantity > available) {
+      setNotice(available > 0 ? `Only ${available} more ${product.name} in stock.` : `There isn’t enough stock for another ${product.name}.`);
       return false;
     }
-    if (product.stock < (cart[product.id] ?? 0) + 1) {
-      setNotice(`There isn’t enough stock for another ${product.name}.`);
-      return true;
-    }
-    setCart((current) => ({ ...current, [product.id]: (current[product.id] ?? 0) + 1 }));
-    setNotice(`Scanned ${product.name} — added to the order.`);
+    setCart((current) => ({ ...current, [product.id]: (current[product.id] ?? 0) + quantity }));
+    setNotice(`Added ${quantity} × ${product.name} to the order.`);
     return true;
   }
 
-  useBarcodeScanner(
-    addScannedProduct,
-    signedIn && activePage === "pos" && !showCheckoutDialog && !showAddProduct && !editingProductPrices && !editingProductImage && !showAddEmployee && !restockProduct && !showHelpCenter,
-  );
+  // Enter in the search box: a scanned/typed barcode, or the only matching
+  // product, is added to the order. "24/<barcode>" adds 24 of that item.
+  function submitSaleEntry() {
+    const { quantity, term } = parseSaleEntry(search);
+    const keepEntry = () => searchInputRef.current?.select();
+    if (quantity !== null && (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 9999)) {
+      setNotice("Enter a quantity from 1 to 9,999 before the slash, e.g. 24/4800016644290.");
+      keepEntry();
+      return;
+    }
+    if (!term) {
+      if (quantity !== null) setNotice(`Now scan or type the item to add ${quantity} of it.`);
+      return;
+    }
+    const product = products.find((item) => item.barcode === term) ?? (visibleProducts.length === 1 ? visibleProducts[0] : undefined);
+    if (!product) {
+      setNotice(visibleProducts.length > 1 ? `${visibleProducts.length} products match “${term}”. Keep typing or pick one.` : `No product found for “${term}”.`);
+      keepEntry();
+      return;
+    }
+    if (addProductQuantity(product, quantity ?? 1)) setSearch("");
+    else keepEntry();
+  }
+
+  function choosePaymentMethod(method: PaymentMethod) {
+    setPaymentMethod(method);
+    setCashReceived("");
+    setPaymentReferenceLast4("");
+  }
+
+  function goToPage(page: Page) {
+    setActivePage(page);
+    setShowNotifications(false);
+    if (page === "employees") {
+      void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees."));
+    }
+  }
+
+  const navItems: { page: Page; label: string; shortLabel: string; icon: LucideIcon }[] = [
+    ...(role === "admin" ? [
+      { page: "dashboard" as const, label: "Dashboard", shortLabel: "Dashboard", icon: LayoutDashboard },
+      { page: "analytics" as const, label: "Analytics & Reports", shortLabel: "Analytics", icon: BarChart3 },
+    ] : []),
+    { page: "pos", label: "Point of sale", shortLabel: "Point of sale", icon: ShoppingCart },
+    ...(role === "admin" ? [
+      { page: "inventory" as const, label: "Inventory", shortLabel: "Inventory", icon: Boxes },
+      { page: "employees" as const, label: "Employees", shortLabel: "Employees", icon: Users },
+    ] : []),
+    { page: "orders", label: "Orders", shortLabel: "Orders", icon: ClipboardList },
+    { page: "shifts", label: "Shifts", shortLabel: "Shifts", icon: CalendarClock },
+    { page: "account", label: "Account", shortLabel: "Account", icon: UserRound },
+  ];
+
+  function closeTopDialog() {
+    if (showHelpCenter) setShowHelpCenter(false);
+    else if (isLoading) return false;
+    else if (showCheckoutDialog) { setShowCheckoutDialog(false); setNotice(""); }
+    else if (showAddProduct) { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }
+    else if (editingProductPrices) setEditingProductPrices(null);
+    else if (editingProductImage) { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }
+    else if (showAddEmployee) setShowAddEmployee(false);
+    else if (restockProduct) setRestockProduct(null);
+    else if (showNotifications) setShowNotifications(false);
+    else return false;
+    return true;
+  }
+
+  function handleShortcut(event: KeyboardEvent) {
+    if (!signedIn || event.defaultPrevented || event.isComposing) return;
+    const target = event.target as HTMLElement | null;
+    const inTextField = !!target?.closest("input, textarea, select, [contenteditable='true']");
+    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct;
+    const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
+
+    if (event.key === "Escape") {
+      if (closeTopDialog()) event.preventDefault();
+      else if (activePage === "pos" && search) { event.preventDefault(); setSearch(""); }
+      return;
+    }
+    if (event.key === "F1") {
+      event.preventDefault();
+      if (!dialogOpen) setShowHelpCenter(true);
+      return;
+    }
+    if (dialogOpen) {
+      // Modal options bind their own F-keys (useFunctionKeys); keep unused
+      // ones from triggering browser help or find while a modal is open.
+      if (/^F[1-47-9]$/.test(event.key)) event.preventDefault();
+      return;
+    }
+    if (event.altKey && !event.ctrlKey && !event.metaKey && digit) {
+      const item = navItems[Number(digit) - 1];
+      if (item) { event.preventDefault(); goToPage(item.page); }
+      return;
+    }
+    if (activePage !== "pos") return;
+    if (event.key === "F2") {
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    } else if (event.key === "F4") {
+      event.preventDefault();
+      if (itemCount && !isLoading) { setNotice(""); setShowCheckoutDialog(true); }
+    } else if (event.key === "F9") {
+      event.preventDefault();
+      if (itemCount) { setCart({}); setNotice("Order cleared."); }
+    } else if (!inTextField && !event.ctrlKey && !event.altKey && !event.metaKey && event.key.length === 1 && event.key !== " ") {
+      // Type-to-search: typing or scanning anywhere on the POS starts a new
+      // entry in the search box, where Enter adds the item.
+      event.preventDefault();
+      setSearch(event.key);
+      searchInputRef.current?.focus();
+    }
+  }
+
+  useFunctionKeys({
+    F1: () => choosePaymentMethod("cash"),
+    F2: () => choosePaymentMethod("e_wallet"),
+    F3: () => choosePaymentMethod("card"),
+  }, showCheckoutDialog && !showHelpCenter && !isLoading);
+
+  const shortcutHandlerRef = useRef(handleShortcut);
+  useEffect(() => {
+    shortcutHandlerRef.current = handleShortcut;
+  });
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => shortcutHandlerRef.current(event);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
 
   function changeQuantity(productId: string, difference: number) {
     const product = products.find((item) => item.id === productId);
@@ -1207,7 +1339,7 @@ export default function Home() {
                 </div>
                 {authError && <p role="alert" className="text-sm text-red-600">{authError}</p>}
                 <button disabled={isLoading} type="submit" className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/20 transition hover:bg-blue-700 disabled:opacity-60">
-                  {isLoading ? "Signing in…" : <>Sign in as {role} <ArrowRight size={17} /></>}
+                  {isLoading ? "Signing in…" : <>Sign in as {role} <ArrowRight size={17} /><Kbd>Enter</Kbd></>}
                 </button>
               </form>
 
@@ -1235,21 +1367,14 @@ export default function Home() {
           <div className="mt-10">
             <p className="mb-3 px-3 text-[10px] font-bold tracking-[0.16em] text-slate-400">WORKSPACE</p>
             <nav className="space-y-1">
-              {isAdmin && <SidebarLink icon={LayoutDashboard} label="Dashboard" active={currentView === "dashboard"} onClick={() => setActivePage("dashboard")} />}
-              {isAdmin && <SidebarLink icon={BarChart3} label="Analytics & Reports" active={currentView === "analytics"} onClick={() => setActivePage("analytics")} />}
-              <SidebarLink icon={ShoppingCart} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
-              {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
-              {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
-              <SidebarLink icon={ClipboardList} label="Orders" active={currentView === "orders"} onClick={() => setActivePage("orders")} />
-              <SidebarLink icon={CalendarClock} label="Shifts" active={currentView === "shifts"} onClick={() => setActivePage("shifts")} />
-              <SidebarLink icon={UserRound} label="Account" active={currentView === "account"} onClick={() => setActivePage("account")} />
+              {navItems.map((item, index) => <SidebarLink key={item.page} icon={item.icon} label={item.label} shortcut={`Alt+${index + 1}`} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
             </nav>
           </div>
           <div className="mt-auto rounded-2xl bg-[#f2f6ff] p-4 dark:bg-slate-800">
             <div className="mb-3 grid h-9 w-9 place-items-center rounded-xl bg-white text-blue-600 shadow-sm dark:bg-slate-700 dark:text-blue-300"><CircleHelpIcon /></div>
             <p className="text-sm font-semibold">Need a hand?</p>
             <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-300">Your store team is here to help you out.</p>
-            <button type="button" onClick={() => setShowHelpCenter(true)} className="mt-3 text-xs font-semibold text-blue-700 dark:text-blue-300">Visit help center <ArrowRight size={12} className="ml-1 inline" /></button>
+            <button type="button" onClick={() => setShowHelpCenter(true)} aria-keyshortcuts="F1" className="mt-3 flex items-center gap-1.5 text-xs font-semibold text-blue-700 dark:text-blue-300">Visit help center <Kbd>F1</Kbd></button>
           </div>
           <button type="button" onClick={() => void signOut()} className="mt-5 flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800">
             <LogOut size={17} /> Sign out
@@ -1264,7 +1389,7 @@ export default function Home() {
               <p className="mt-0.5 text-xs text-slate-400">Here’s what’s happening in your store today.</p>
             </div>
             <div className="flex items-center gap-2 sm:gap-4">
-              <button type="button" aria-label="Open help center" onClick={() => setShowHelpCenter(true)} className="grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={19} /></button>
+              <button type="button" aria-label="Open help center (F1)" title="Help (F1)" aria-keyshortcuts="F1" onClick={() => setShowHelpCenter(true)} className="grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={19} /></button>
               <div className="hidden items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600 sm:flex">
                 <Clock3 size={14} className="text-slate-400" />
                 {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
@@ -1296,14 +1421,7 @@ export default function Home() {
           </header>
 
           <nav aria-label="Workspace navigation" className="flex gap-1 overflow-x-auto border-b border-slate-100 bg-white px-4 py-2 dark:border-slate-800 dark:bg-slate-900 lg:hidden">
-            {isAdmin && <SidebarLink icon={LayoutDashboard} label="Dashboard" active={currentView === "dashboard"} onClick={() => setActivePage("dashboard")} />}
-            {isAdmin && <SidebarLink icon={BarChart3} label="Analytics" active={currentView === "analytics"} onClick={() => setActivePage("analytics")} />}
-            <SidebarLink icon={ShoppingCart} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
-            {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
-            {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
-            <SidebarLink icon={ClipboardList} label="Orders" active={currentView === "orders"} onClick={() => setActivePage("orders")} />
-            <SidebarLink icon={CalendarClock} label="Shifts" active={currentView === "shifts"} onClick={() => setActivePage("shifts")} />
-            <SidebarLink icon={UserRound} label="Account" active={currentView === "account"} onClick={() => setActivePage("account")} />
+            {navItems.map((item) => <SidebarLink key={item.page} icon={item.icon} label={item.shortLabel} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
           </nav>
 
           <div className="p-4 sm:p-7 xl:p-9">
@@ -1331,7 +1449,7 @@ export default function Home() {
                       onImageChange={setSelectedProductImage}
                     />
                     <div className="flex gap-3">
-                      <button type="button" disabled={isLoading} onClick={() => { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button>
+                      <button type="button" disabled={isLoading} onClick={() => { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel <Kbd>Esc</Kbd></button>
                       <button type="submit" disabled={isLoading} className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : "Save image"}</button>
                     </div>
                   </form>
@@ -1416,26 +1534,31 @@ export default function Home() {
                       <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">New sale</span></div>
                       <h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">New sale</h1>
                       <p className="mt-1 text-sm text-slate-500">Find a product and add it to the customer’s order.</p>
-                      <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-400"><ScanBarcode size={13} /> Barcode scanner ready — scan any item to add it.</p>
+                      <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-400"><ScanBarcode size={13} /> Scan an item to add it. Type a quantity and slash first to add several, e.g. <code className="rounded bg-slate-100 px-1 font-mono text-slate-500 dark:bg-slate-800">24/</code> then scan.</p>
                     </div>
-                    <div className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 sm:w-[230px]">
+                    <div className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 focus-within:border-blue-400 sm:w-[300px]">
                       <Search size={16} className="shrink-0 text-slate-400" />
+                      {entryQuantity !== null && <span className="shrink-0 rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-bold text-blue-700">×{entryQuantity}</span>}
                       <input
+                        ref={searchInputRef}
                         value={search}
                         onChange={(event) => setSearch(event.target.value)}
                         onKeyDown={(event) => {
-                          if (event.key !== "Enter" || !search.trim()) return;
-                          event.preventDefault();
-                          if (products.some((product) => product.barcode === search.trim())) {
-                            addScannedProduct(search.trim());
-                            setSearch("");
+                          if (event.key === "ArrowDown") {
+                            event.preventDefault();
+                            document.querySelector<HTMLButtonElement>("[data-product-card]:not(:disabled)")?.focus();
+                          } else if (event.key === "Enter") {
+                            event.preventDefault();
+                            submitSaleEntry();
                           }
                         }}
-                        placeholder="Search or scan barcode..."
-                        aria-label="Search products or scan a barcode"
-                        className="w-full bg-transparent text-sm outline-none placeholder:text-slate-400"
+                        placeholder="Search, scan, or 24/barcode"
+                        aria-label="Search products or scan a barcode. Prefix a quantity and slash to add several, for example 24/ then the barcode."
+                        aria-keyshortcuts="F2"
+                        autoComplete="off"
+                        className="w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-slate-400"
                       />
-                      {search && <button type="button" aria-label="Clear search" onClick={() => setSearch("")}><X size={14} className="text-slate-400" /></button>}
+                      {search ? <button type="button" aria-label="Clear search" onClick={() => setSearch("")} className="flex items-center gap-1 text-slate-400"><Kbd>Esc</Kbd><X size={14} /></button> : <Kbd className="text-slate-400">F2</Kbd>}
                     </div>
                   </div>
 
@@ -1448,11 +1571,11 @@ export default function Home() {
                   </div>
 
                   {visibleProducts.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-3">
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-3" onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
                       {visibleProducts.map((product) => {
                         const unavailable = product.stock <= (cart[product.id] ?? 0);
                         return (
-                          <button type="button" key={product.id} disabled={unavailable} onClick={() => addToCart(product)} className={`group relative rounded-2xl border border-slate-100 bg-white p-3 text-left shadow-[0_2px_10px_rgba(20,45,90,0.025)] transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 sm:p-4`}>
+                          <button type="button" key={product.id} data-product-card disabled={unavailable} onClick={() => addToCart(product)} className={`group relative rounded-2xl border border-slate-100 bg-white p-3 text-left shadow-[0_2px_10px_rgba(20,45,90,0.025)] transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 sm:p-4`}>
                             <ProductArtwork product={product} className={`mb-3 aspect-[1.6/1] rounded-xl text-[42px] transition-transform group-hover:scale-[1.015]`} />
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
@@ -1498,6 +1621,7 @@ export default function Home() {
               <div><p className="text-xs font-semibold text-blue-600">PAYMENT</p><h2 id="checkout-title" className="mt-1 text-xl font-semibold">Complete checkout</h2><p className="mt-1 text-sm text-slate-500">{itemCount} item{itemCount === 1 ? "" : "s"} · {money(total)} due</p></div>
               <button type="button" aria-label="Close checkout dialog" disabled={isLoading} onClick={() => setShowCheckoutDialog(false)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
             </div>
+            <form noValidate onSubmit={(event) => { event.preventDefault(); if (!isLoading) void checkout(); }}>
             <fieldset className="space-y-2">
               <legend className="mb-2 text-sm font-semibold text-slate-700">Choose payment method</legend>
               <div className="grid grid-cols-3 gap-2">
@@ -1505,8 +1629,8 @@ export default function Home() {
                   { method: "cash", label: "Cash", Icon: Banknote },
                   { method: "e_wallet", label: "E-Wallet", Icon: WalletCards },
                   { method: "card", label: "Card", Icon: CreditCard },
-                ] as const).map(({ method, label, Icon }) => (
-                  <button key={method} type="button" aria-pressed={paymentMethod === method} onClick={() => { setPaymentMethod(method); setCashReceived(""); setPaymentReferenceLast4(""); }} className={`flex h-12 flex-col items-center justify-center gap-1 rounded-lg border text-xs font-semibold ${paymentMethod === method ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:border-blue-200"}`}><Icon size={16} />{label}</button>
+                ] as const).map(({ method, label, Icon }, index) => (
+                  <button key={method} type="button" aria-pressed={paymentMethod === method} aria-keyshortcuts={`F${index + 1}`} onClick={() => choosePaymentMethod(method)} className={`flex h-14 flex-col items-center justify-center gap-1 rounded-lg border text-xs font-semibold ${paymentMethod === method ? "border-blue-500 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500 hover:border-blue-200"}`}><Icon size={16} />{label}<Kbd>F{index + 1}</Kbd></button>
                 ))}
               </div>
             </fieldset>
@@ -1524,9 +1648,10 @@ export default function Home() {
             )}
             {notice && <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{notice}</p>}
             <div className="mt-5 flex gap-3">
-              <button type="button" disabled={isLoading} onClick={() => { setShowCheckoutDialog(false); setNotice(""); }} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button>
-              <button type="button" disabled={isLoading || !itemCount} onClick={checkout} className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">{isLoading ? "Processing…" : "Confirm payment"}</button>
+              <button type="button" disabled={isLoading} onClick={() => { setShowCheckoutDialog(false); setNotice(""); }} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel <Kbd>Esc</Kbd></button>
+              <button type="submit" disabled={isLoading || !itemCount} aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">{isLoading ? "Processing…" : <>Confirm payment <Kbd>Enter</Kbd></>}</button>
             </div>
+            </form>
           </div>
         </div>
       )}
@@ -1553,7 +1678,7 @@ export default function Home() {
                 onIconChange={setSelectedProductIcon}
                 onImageChange={setSelectedProductImage}
               />
-              <div className="flex gap-3 pt-2"><button type="button" onClick={() => { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add product</button></div>
+              <div className="flex gap-3 pt-2"><button type="button" onClick={() => { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button><button type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add product <Kbd>Enter</Kbd></button></div>
             </form>
           </div>
         </div>
@@ -1570,7 +1695,7 @@ export default function Home() {
               <label className="block text-sm font-medium text-slate-700">Wholesale price (₱)<input required name="wholesale_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.wholesalePrice} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" defaultValue={editingProductPrices.price} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <BarcodeField defaultValue={editingProductPrices.barcode ?? ""} />
-              <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button><button disabled={isLoading} type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : "Save prices"}</button></div>
+              <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={() => setEditingProductPrices(null)} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel <Kbd>Esc</Kbd></button><button disabled={isLoading} type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : <>Save <Kbd>Enter</Kbd></>}</button></div>
             </form>
           </div>
         </div>
@@ -1583,7 +1708,7 @@ export default function Home() {
               <label className="block text-sm font-medium text-slate-700">Full name<input required maxLength={100} name="fullName" autoComplete="name" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Work email<input required type="email" name="email" autoComplete="email" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Temporary password<input required minLength={8} type="password" name="password" autoComplete="new-password" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /><span className="mt-1 block text-xs font-normal text-slate-400">At least 8 characters. Share it securely with the employee.</span></label>
-              <div className="flex gap-3 pt-2"><button type="button" onClick={() => setShowAddEmployee(false)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button disabled={isLoading} type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Creating…" : "Create account"}</button></div>
+              <div className="flex gap-3 pt-2"><button type="button" onClick={() => setShowAddEmployee(false)} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button><button disabled={isLoading} type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Creating…" : <>Create account <Kbd>Enter</Kbd></>}</button></div>
             </form>
           </div>
         </div>
@@ -1595,7 +1720,7 @@ export default function Home() {
             <form onSubmit={restock} className="space-y-4">
               <label className="block text-sm font-medium text-slate-700">Units received<input required autoFocus name="quantity" type="number" min="1" max="1000000" step="1" placeholder="e.g. 24" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Note <span className="font-normal text-slate-400">(optional)</span><input maxLength={200} name="note" placeholder="Supplier delivery, invoice number…" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
-              <div className="flex gap-3 pt-2"><button type="button" onClick={() => setRestockProduct(null)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel</button><button disabled={isLoading} type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Updating…" : "Add to stock"}</button></div>
+              <div className="flex gap-3 pt-2"><button type="button" onClick={() => setRestockProduct(null)} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button><button disabled={isLoading} type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Updating…" : <>Add to stock <Kbd>Enter</Kbd></>}</button></div>
             </form>
           </div>
         </div>
@@ -1617,11 +1742,37 @@ function CircleHelpIcon() {
   return <CircleHelp size={17} />;
 }
 
-function SidebarLink({ icon: Icon, label, active, onClick }: { icon: LucideIcon; label: string; active: boolean; onClick: () => void }) {
+function SidebarLink({ icon: Icon, label, shortcut, active, onClick }: { icon: LucideIcon; label: string; shortcut?: string; active: boolean; onClick: () => void }) {
   return (
-    <button type="button" onClick={onClick} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-medium transition ${active ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}>
-      <Icon size={17} strokeWidth={active ? 2.2 : 1.8} />{label}
+    <button type="button" onClick={onClick} aria-keyshortcuts={shortcut} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-[13px] font-medium transition ${active ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:bg-slate-50 hover:text-slate-800"}`}>
+      <Icon size={17} strokeWidth={active ? 2.2 : 1.8} /><span className="flex-1 text-left">{label}</span>{shortcut && <Kbd>{shortcut}</Kbd>}
     </button>
+  );
+}
+
+// Arrow keys move between product cards; columns are found from the cards'
+// rendered positions, so this follows the responsive grid.
+function moveProductFocus(event: ReactKeyboardEvent<HTMLDivElement>, onLeaveTop: () => void) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+  const cards = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-product-card]:not(:disabled)"));
+  const index = cards.indexOf(document.activeElement as HTMLButtonElement);
+  if (index === -1) return;
+  event.preventDefault();
+  const column = cards[index].offsetLeft;
+  let next: HTMLButtonElement | undefined;
+  if (event.key === "ArrowLeft") next = cards[index - 1];
+  else if (event.key === "ArrowRight") next = cards[index + 1];
+  else if (event.key === "ArrowDown") next = cards.slice(index + 1).find((card) => card.offsetLeft === column);
+  else next = cards.slice(0, index).reverse().find((card) => card.offsetLeft === column);
+  if (next) next.focus();
+  else if (event.key === "ArrowUp") onLeaveTop();
+}
+
+// Keyboard-shortcut hint shown inside buttons, e.g. "Confirm payment [Enter]".
+// Hidden on small screens, where a hardware keyboard is unlikely.
+function Kbd({ children, className = "" }: { children: ReactNode; className?: string }) {
+  return (
+    <kbd className={`hidden shrink-0 rounded border border-current px-1 py-px font-sans text-[9px] font-semibold uppercase leading-3 tracking-wide opacity-60 sm:inline-block ${className}`}>{children}</kbd>
   );
 }
 
@@ -1738,12 +1889,22 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
   onNavigate: (page: "pos" | "inventory" | "orders") => void;
   showInventory: boolean;
 }) {
+  const options: { key: FunctionKey; page: "pos" | "inventory" | "orders"; label: string; icon: LucideIcon }[] = [
+    { key: "F2", page: "pos", label: "Open point of sale", icon: ShoppingCart },
+    ...(showInventory ? [{ key: "F3" as const, page: "inventory" as const, label: "Open inventory", icon: Boxes }] : []),
+    { key: showInventory ? "F4" : "F3", page: "orders", label: "View orders", icon: ReceiptText },
+  ];
+  useFunctionKeys({
+    F1: onClose,
+    ...Object.fromEntries(options.map((option) => [option.key, () => onNavigate(option.page)])),
+  });
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="help-center-title" className="max-h-[85vh] w-full max-w-xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
         <div className="mb-5 flex items-start justify-between">
           <div className="flex items-start gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><CircleHelp size={20} /></div><div><p className="text-xs font-semibold text-blue-600">CLOVER &amp; CO. SUPPORT</p><h2 id="help-center-title" className="mt-1 text-xl font-semibold">Help center</h2><p className="mt-1 text-sm text-slate-500">Quick answers for everyday store tasks.</p></div></div>
-          <button type="button" aria-label="Close help center" onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
+          <button type="button" aria-label="Close help center (Esc)" aria-keyshortcuts="Escape" onClick={onClose} className="flex items-center gap-1.5 rounded-lg p-2 text-slate-400 hover:bg-slate-50"><Kbd>Esc</Kbd><X size={18} /></button>
         </div>
         <div className="divide-y divide-slate-100 rounded-xl border border-slate-100 px-4">
           <details className="py-3" open>
@@ -1760,7 +1921,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I use a barcode scanner?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Plug in any USB or Bluetooth scanner that works as a keyboard. On Point of sale, scan an item and it is added to the order. Admins assign barcodes from Inventory using Prices &amp; barcode, when adding a product, or with a barcode column in a CSV/JSON import.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Plug in any USB or Bluetooth scanner that works as a keyboard. On Point of sale, scan an item and it is added to the order. To add several at once, type the quantity and a slash first, then scan — for example 24/ then scan adds 24. You can also type 24/ followed by the barcode or product name and press Enter. Admins assign barcodes from Inventory using Prices &amp; barcode, when adding a product, or with a barcode column in a CSV/JSON import.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">What does the Shifts page show?</summary>
@@ -1771,10 +1932,31 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
             <p className="mt-2 text-xs leading-5 text-slate-500">Open Orders to review recent transactions, totals, payment methods, cash received, change due, and payment reference digits.</p>
           </details>
         </div>
+        <div className="mt-5 hidden rounded-xl border border-slate-100 p-4 sm:block">
+          <h3 className="text-sm font-semibold">Keyboard shortcuts</h3>
+          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
+            {([
+              ["Alt + 1–9", "Go to a page (numbers shown in the sidebar)"],
+              ["Type or scan", "On Point of sale, starts a search or barcode entry"],
+              ["24/ + scan", "Adds 24 of the scanned item (any quantity up to 9,999)"],
+              ["Enter", "Add the scanned or only matching item · confirm a dialog"],
+              ["↑ ↓ ← →", "Move between products; Enter adds the focused one"],
+              ["F2", "Focus the product search"],
+              ["F4", "Continue to payment"],
+              ["F1 / F2 / F3", "In checkout: Cash / E-Wallet / Card"],
+              ["F-keys in pop-ups", "Choose a pop-up’s options (shown on each option)"],
+              ["F9", "Clear the current order"],
+              ["Esc", "Close a dialog or clear the search"],
+              ["F1", "Open this help center"],
+            ] as const).map(([keys, action]) => (
+              <div key={keys} className="contents"><dt><kbd className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-sans text-[10px] font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">{keys}</kbd></dt><dd className="text-slate-500">{action}</dd></div>
+            ))}
+          </dl>
+        </div>
         <div className="mt-5 flex flex-wrap gap-2">
-          <button type="button" onClick={() => onNavigate("pos")} className="inline-flex h-9 items-center gap-2 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"><ShoppingCart size={14} /> Open point of sale</button>
-          {showInventory && <button type="button" onClick={() => onNavigate("inventory")} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50"><Boxes size={14} /> Open inventory</button>}
-          <button type="button" onClick={() => onNavigate("orders")} className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:bg-slate-50"><ReceiptText size={14} /> View orders</button>
+          {options.map(({ key, page, label, icon: Icon }, index) => (
+            <button key={page} type="button" aria-keyshortcuts={key} onClick={() => onNavigate(page)} className={`inline-flex h-9 items-center gap-2 rounded-lg px-3 text-xs font-semibold ${index === 0 ? "bg-blue-600 text-white hover:bg-blue-700" : "border border-slate-200 text-slate-600 hover:bg-slate-50"}`}><Icon size={14} /> {label}<Kbd>{key}</Kbd></button>
+          ))}
         </div>
       </section>
     </div>
@@ -1839,6 +2021,12 @@ function ProductImagePicker({
   onImageChange: (image: File | null) => void;
 }) {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const canRemoveImage = !!selectedImage || (!!existingImageUrl && !existingImageRemoved && !!onRemoveExisting);
+  useFunctionKeys({
+    F1: () => fileInputRef.current?.click(),
+    ...(canRemoveImage ? { F2: () => (selectedImage ? onImageChange(null) : onRemoveExisting?.()) } : {}),
+  });
 
   useEffect(() => {
     if (!selectedImage) {
@@ -1860,9 +2048,10 @@ function ProductImagePicker({
           {imagePreviewUrl ? <Image src={imagePreviewUrl} alt="Product image preview" width={64} height={64} unoptimized className="h-full w-full object-cover" /> : productIcons.find((icon) => icon.id === selectedIcon)?.emoji || "✨"}
         </div>
         <div className="min-w-0 flex-1">
-          <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700">
-            <FileUp size={14} /> Choose custom image
+          <label aria-keyshortcuts="F1" className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700">
+            <FileUp size={14} /> Choose custom image <Kbd>F1</Kbd>
             <input
+              ref={fileInputRef}
               type="file"
               accept="image/jpeg,image/png,image/webp"
               className="sr-only"
@@ -1870,9 +2059,9 @@ function ProductImagePicker({
             />
           </label>
           {selectedImage ? (
-            <button type="button" onClick={() => onImageChange(null)} className="ml-2 text-xs font-medium text-red-500 hover:text-red-700">Remove image</button>
+            <button type="button" aria-keyshortcuts="F2" onClick={() => onImageChange(null)} className="ml-2 inline-flex items-center gap-1.5 text-xs font-medium text-red-500 hover:text-red-700">Remove image <Kbd>F2</Kbd></button>
           ) : existingImageUrl && !existingImageRemoved ? (
-            <button type="button" onClick={onRemoveExisting} className="ml-2 text-xs font-medium text-red-500 hover:text-red-700">Remove current image</button>
+            <button type="button" aria-keyshortcuts="F2" onClick={onRemoveExisting} className="ml-2 inline-flex items-center gap-1.5 text-xs font-medium text-red-500 hover:text-red-700">Remove current image <Kbd>F2</Kbd></button>
           ) : (
             <p className="mt-1.5 text-[11px] text-slate-400">JPEG, PNG or WebP · max 5 MB</p>
           )}
@@ -1914,7 +2103,7 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
     <aside className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-[0_3px_16px_rgba(20,45,90,0.035)] 2xl:sticky 2xl:top-[96px]">
       <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
         <div><div className="flex items-center gap-2"><ShoppingCart size={17} className="text-blue-600" /><h2 className="text-sm font-semibold">Current order</h2></div><p className="mt-1 pl-[25px] text-[11px] text-slate-400">New sale</p></div>
-        {count > 0 && <button type="button" onClick={onClear} className="text-[11px] font-semibold text-slate-400 hover:text-red-500">Clear all</button>}
+        {count > 0 && <button type="button" onClick={onClear} aria-keyshortcuts="F9" className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-red-500">Clear all <Kbd>F9</Kbd></button>}
       </div>
       <div className="flex items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px]"><span className="text-slate-500">Customer</span><button type="button" className="flex items-center gap-1 font-semibold text-blue-700">Walk-in customer <ChevronDown size={13} /></button></div>
       <div className="max-h-[330px] min-h-[180px] overflow-y-auto px-5">
@@ -1926,7 +2115,7 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
       </div>
       <div className="border-t border-slate-100 px-5 py-4">
         <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(subtotal)}</span></div><div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
-        <button type="button" disabled={!count || isProcessing} onClick={onCheckout} className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : `Continue to payment · ${money(total)}`}</button>
+        <button type="button" disabled={!count || isProcessing} onClick={onCheckout} aria-keyshortcuts="F4" className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : `Continue to payment · ${money(total)}`}{!isProcessing && <Kbd>F4</Kbd>}</button>
         <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-slate-400"><WalletCards size={13} /> Secure, fast checkout</p>
       </div>
     </aside>
