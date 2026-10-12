@@ -250,8 +250,6 @@ export function ShiftHistoryView({ isAdmin }: { isAdmin: boolean }) {
           </ul>
         )}
       </div>
-
-      <CashCountsPanel isAdmin={isAdmin} />
     </section>
   );
 }
@@ -262,77 +260,6 @@ function SummaryCard({ label, icon, shifts, orders, sales }: { label: string; ic
       <p className="flex items-center gap-1.5 text-xs font-medium text-slate-500">{icon}{label}</p>
       <p className="mt-2 text-2xl font-semibold tracking-tight">{money(sales)}</p>
       <p className="mt-1 text-[10px] text-slate-400">{shifts} shift{shifts === 1 ? "" : "s"} · {orders} order{orders === 1 ? "" : "s"}</p>
-    </div>
-  );
-}
-
-type CashCountRow = {
-  id: string;
-  device_label: string;
-  opened_by_name: string;
-  closed_by_name: string;
-  opened_at: string;
-  closed_at: string | null;
-  opening_float: number | string;
-  counted_cash: number | string | null;
-  expected_cash: number | string | null;
-  server_expected_cash: number | string | null;
-  notes: string;
-};
-
-// End-of-shift cash counts synced from the tills. "Expected" is the till's own
-// figure; the database's check (from synced cash sales and refunds) is shown
-// when it differs, e.g. while offline sales from that shift are still syncing.
-function CashCountsPanel({ isAdmin }: { isAdmin: boolean }) {
-  const [rows, setRows] = useState<CashCountRow[]>([]);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    void createClient()
-      .from("cash_sessions")
-      .select("id, device_label, opened_by_name, closed_by_name, opened_at, closed_at, opening_float, counted_cash, expected_cash, server_expected_cash, notes")
-      .order("opened_at", { ascending: false })
-      .limit(60)
-      .then(({ data, error: loadError }) => {
-        if (loadError) setError(/relation|schema cache|does not exist/i.test(loadError.message) ? "Cash counts need the latest database update (migration 202610120013)." : `Couldn’t load cash counts: ${loadError.message}`);
-        else setRows((data ?? []) as CashCountRow[]);
-      });
-  }, []);
-
-  return (
-    <div className="mt-6 overflow-hidden rounded-2xl border border-slate-100 bg-white dark:border-slate-800 dark:bg-slate-900">
-      <div className="border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-        <h2 className="text-sm font-semibold">Cash counts</h2>
-        <p className="mt-1 text-xs text-slate-400">{isAdmin ? "End-of-shift drawer counts from every till." : "Your end-of-shift drawer counts."} Over and short compare the counted cash with what the drawer should hold.</p>
-      </div>
-      {error ? <p className="px-5 py-6 text-sm text-slate-500">{error}</p> : rows.length === 0 ? (
-        <p className="px-5 py-10 text-center text-sm text-slate-400">No drawer sessions yet. Start one from the wallet icon in the top bar.</p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-left text-xs">
-            <thead className="bg-slate-50 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:bg-slate-800"><tr><th className="px-5 py-3">Shift</th><th className="px-4 py-3">Till</th><th className="px-4 py-3 text-right">Opening</th><th className="px-4 py-3 text-right">Expected</th><th className="px-4 py-3 text-right">Counted</th><th className="px-4 py-3 text-right">Over / short</th><th className="px-5 py-3">Notes</th></tr></thead>
-            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-              {rows.map((row) => {
-                const opened = new Date(row.opened_at);
-                const expected = row.expected_cash === null ? null : Number(row.expected_cash);
-                const serverExpected = row.server_expected_cash === null ? null : Number(row.server_expected_cash);
-                const counted = row.counted_cash === null ? null : Number(row.counted_cash);
-                const difference = counted !== null && expected !== null ? Math.round((counted - expected) * 100) / 100 : null;
-                return (
-                  <tr key={row.id}>
-                    <td className="px-5 py-3"><p className="font-medium">{opened.toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Manila" })}</p><p className="mt-0.5 text-[11px] text-slate-400">{row.closed_at ? `Closed ${timeOf(new Date(row.closed_at))} by ${row.closed_by_name || row.opened_by_name}` : `Open · ${row.opened_by_name}`}</p></td>
-                    <td className="px-4 py-3 text-slate-500">{row.device_label || "—"}</td>
-                    <td className="px-4 py-3 text-right">{money(Number(row.opening_float))}</td>
-                    <td className="px-4 py-3 text-right">{expected === null ? "—" : money(expected)}{serverExpected !== null && expected !== null && Math.abs(serverExpected - expected) >= 0.01 && <span className="block text-[10px] text-amber-600" title="Computed by the database from synced cash sales and refunds">DB: {money(serverExpected)}</span>}</td>
-                    <td className="px-4 py-3 text-right">{counted === null ? "—" : money(counted)}</td>
-                    <td className={`px-4 py-3 text-right font-semibold ${difference === null ? "text-slate-400" : difference === 0 ? "text-emerald-600" : difference > 0 ? "text-amber-600" : "text-red-600"}`}>{difference === null ? "—" : difference === 0 ? "Balanced" : `${difference > 0 ? "Over" : "Short"} ${money(Math.abs(difference))}`}</td>
-                    <td className="max-w-[200px] truncate px-5 py-3 text-slate-500" title={row.notes}>{row.notes || "—"}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   );
 }

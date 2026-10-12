@@ -4,8 +4,7 @@
 // keeps the window locked down: no Node.js in the page, sandboxed renderer,
 // no navigation away from the app, and a strict Content Security Policy.
 // All data goes to Supabase over HTTPS using the public key baked into out/.
-const { app, BrowserWindow, ipcMain, Menu, nativeTheme, net, protocol, session, shell } = require("electron");
-const netSocket = require("node:net");
+const { app, BrowserWindow, Menu, nativeTheme, net, protocol, session, shell } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
@@ -65,92 +64,6 @@ async function serveAppRequest(request) {
   return new Response(response.body, { status: file ? 200 : 404, headers });
 }
 
-// ---------- receipt printer and cash drawer ----------
-
-// Only the app's own page may use the hardware handlers.
-function fromAppPage(event) {
-  const url = event.senderFrame?.url ?? "";
-  return isAppUrl(url) || url === `${APP_ORIGIN}/`;
-}
-
-// ESC p 0 25 250: pulse drawer pin 2 (the standard ESC/POS drawer kick).
-const DRAWER_KICK = Buffer.from([0x1b, 0x70, 0x00, 0x19, 0xfa]);
-
-function sendToNetworkPrinter(host, port, data) {
-  return new Promise((resolve, reject) => {
-    const socket = netSocket.createConnection({ host, port, timeout: 4000 }, () => {
-      socket.end(data, resolve);
-    });
-    socket.on("timeout", () => { socket.destroy(); reject(new Error(`No response from ${host}:${port}.`)); });
-    socket.on("error", (error) => reject(new Error(`Couldn’t reach the printer at ${host}:${port} (${error.code ?? error.message}).`)));
-  });
-}
-
-async function printHtml(html, { printerName, paperWidth }) {
-  const window = new BrowserWindow({
-    show: false,
-    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, devTools: false },
-  });
-  // The receipt is a self-contained document; it may not navigate anywhere.
-  window.webContents.on("will-navigate", (event) => event.preventDefault());
-  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-  try {
-    await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-    // Size the page to the receipt so roll paper is cut right after it.
-    const heightPx = await window.webContents.executeJavaScript("document.documentElement.scrollHeight");
-    const heightMicrons = Math.max(Math.ceil(Number(heightPx) * 264.583) + 6000, 60000);
-    await new Promise((resolve, reject) => {
-      window.webContents.print({
-        silent: true,
-        deviceName: printerName || undefined,
-        printBackground: false,
-        margins: { marginType: "none" },
-        pageSize: { width: paperWidth * 1000, height: heightMicrons },
-      }, (success, failureReason) => (success ? resolve() : reject(new Error(failureReason || "The printer didn’t accept the receipt."))));
-    });
-  } finally {
-    window.destroy();
-  }
-}
-
-function registerHardwareHandlers() {
-  ipcMain.handle("pos:list-printers", async (event) => {
-    if (!fromAppPage(event) || !mainWindow) throw new Error("Not allowed.");
-    const printers = await mainWindow.webContents.getPrintersAsync();
-    return printers.map((printer) => ({ name: printer.name, displayName: printer.displayName || printer.name, isDefault: !!printer.isDefault }));
-  });
-
-  ipcMain.handle("pos:print-html", async (event, html, options) => {
-    if (!fromAppPage(event)) throw new Error("Not allowed.");
-    if (typeof html !== "string" || html.length > 2_000_000) throw new Error("Invalid receipt.");
-    const printerName = typeof options?.printerName === "string" ? options.printerName.slice(0, 200) : "";
-    const paperWidth = options?.paperWidth === 58 ? 58 : 80;
-    await printHtml(html, { printerName, paperWidth });
-  });
-
-  ipcMain.handle("pos:open-drawer", async (event, options) => {
-    if (!fromAppPage(event)) throw new Error("Not allowed.");
-    if (options?.mode === "network") {
-      const host = String(options.host ?? "");
-      const port = Number(options.port);
-      if (!/^[A-Za-z0-9.-]{1,253}$/.test(host) || !Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error("Enter the printer’s IP address (or host name) and port.");
-      }
-      await sendToNetworkPrinter(host, port, DRAWER_KICK);
-      return;
-    }
-    if (options?.mode === "shared") {
-      if (process.platform !== "win32") throw new Error("Shared-printer drawers are supported on Windows only.");
-      const share = String(options.share ?? "");
-      if (!/^[A-Za-z0-9 _.-]{1,64}$/.test(share)) throw new Error("Enter the printer’s Windows share name.");
-      // Raw bytes to a shared printer: \\localhost\<share>.
-      await fs.promises.writeFile(`\\\\localhost\\${share}`, DRAWER_KICK);
-      return;
-    }
-    throw new Error("Choose how the cash drawer is connected.");
-  });
-}
-
 // ---------- window state ----------
 
 const stateFile = () => path.join(app.getPath("userData"), "window-state.json");
@@ -206,7 +119,6 @@ function createWindow() {
       webviewTag: false,
       spellcheck: false,
       devTools: isDev || !app.isPackaged,
-      preload: path.join(__dirname, "preload.cjs"),
     },
   });
   if (state.maximized) mainWindow.maximize();
@@ -253,7 +165,6 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
 
   protocol.handle(SCHEME, serveAppRequest);
-  registerHardwareHandlers();
 
   // The POS needs no camera, microphone, location or notifications. Only
   // clipboard writes ("Copy order number") are allowed.

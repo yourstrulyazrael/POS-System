@@ -54,17 +54,12 @@ import {
 } from "lucide-react";
 import { AUTH_STORAGE_KEY, callPosAdmin, createClient } from "@/lib/supabase/client";
 import { deletePendingOrder, isNetworkError, listPendingOrders, readCache, savePendingOrder, storedSessionUserId, writeCache, type PendingOrder } from "@/lib/offline-store";
-import { buildCashCountReport, buildRefundReceipt, buildSaleReceipt, defaultStoreDetails, type StoreDetails } from "@/lib/receipts";
-import { defaultHardwareSettings, loadHardwareSettings, openCashDrawer, printDocument, saveHardwareSettings, type HardwareSettings } from "@/lib/hardware";
-import { rememberOfflineCredential, verifyOfflineCredential } from "@/lib/offline-auth";
-import { closeSession, expectedCash, openSession, readCurrentSession, readSessionOutbox, recordInSession, removeFromSessionOutbox, type CashSession } from "@/lib/cash-session";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { AnalyticsReportsView } from "@/components/analytics-reports";
 import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
-import { CashCountDialog, DrawerStatusButton, HardwareSettingsCard, OpenDrawerDialog, ReconnectBanner, RefundDialog, RefundIcon, StoreDetailsCard, VoidDialog, VoidIcon } from "@/components/pos-dialogs";
 import { buildProductsXlsx, buildTemplateXlsx, importColumns, readProductFile, type RawProductRecord } from "@/lib/product-import";
 import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
@@ -87,8 +82,8 @@ type Product = {
   emoji: string;
   color: string;
 };
-type OrderLine = { id?: string; name: string; quantity: number; unitPrice: number; custom: boolean; refundedQuantity: number };
-type Order = { id: string; fullId: string; items: number; total: number; time: string; createdAt: Date; lines: OrderLine[]; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string; isWholesale: boolean; syncStatus?: "pending" | "failed"; syncError?: string | null; status: "completed" | "voided"; refundedTotal: number; voidReason: string | null };
+type OrderLine = { name: string; quantity: number; unitPrice: number; custom: boolean };
+type Order = { id: string; fullId: string; items: number; total: number; time: string; createdAt: Date; lines: OrderLine[]; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string; isWholesale: boolean; syncStatus?: "pending" | "failed"; syncError?: string | null };
 type SalesChartPoint = { label: string; cash: number; eWallet: number; card: number };
 type ProfitReportPoint = {
   label: string;
@@ -113,11 +108,7 @@ type OrderRow = {
   id: string;
   total: number;
   created_at: string;
-  order_items: { id: string; quantity: number; product_name: string; unit_price: number | string; product_id: string | null; refund_items: { quantity: number }[] }[];
-  status: "completed" | "voided";
-  refunded_total: number | string;
-  void_reason: string | null;
-  client_order_id: string | null;
+  order_items: { quantity: number; product_name: string; unit_price: number | string; product_id: string | null }[];
   payment_method: PaymentMethod;
   payment_reference_last4: string | null;
   cash_received: number | string | null;
@@ -213,7 +204,6 @@ function pendingToOrder(sale: PendingOrder): Order {
       quantity: item.quantity,
       unitPrice: item.unitPrice,
       custom: item.kind === "custom",
-      refundedQuantity: 0,
     })),
     items: sale.items.reduce((sum, item) => sum + item.quantity, 0),
     total: sale.total,
@@ -226,9 +216,6 @@ function pendingToOrder(sale: PendingOrder): Order {
     isWholesale: sale.wholesale,
     syncStatus: sale.failed ? "failed" : "pending",
     syncError: sale.lastError,
-    status: "completed",
-    refundedTotal: 0,
-    voidReason: null,
   };
 }
 
@@ -244,19 +231,8 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
     supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url, barcode").eq("active", true).order("name").returns<ProductRow[]>(),
-    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, status, refunded_total, void_reason, client_order_id, order_items(id, quantity, product_name, unit_price, product_id, refund_items(quantity))").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
+    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, order_items(quantity, product_name, unit_price, product_id)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
-  // Receipt header; optional until the refunds/receipts migration is applied.
-  const storeResult = await supabase.from("store_settings").select("store_name, address, phone, tin, receipt_footer").eq("id", 1).maybeSingle();
-  const storeDetails: StoreDetails = !storeResult.error && storeResult.data
-    ? {
-      storeName: storeResult.data.store_name,
-      address: storeResult.data.address,
-      phone: storeResult.data.phone,
-      tin: storeResult.data.tin,
-      receiptFooter: storeResult.data.receipt_footer,
-    }
-    : defaultStoreDetails;
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
   if (ordersResult.error) throw new Error(`Unable to load orders: ${ordersResult.error.message}`);
   let stats: DashboardStats | null = null;
@@ -319,21 +295,12 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       barcode: product.barcode,
       ...productAppearance(product.name, product.category, index, product.image_icon ?? "auto"),
     })),
-    orders: ordersResult.data.map((order): Order => ({
-      // The receipt number is the sale's one-time id, so receipts printed offline
-      // match the order after it syncs.
-      id: `#${(order.client_order_id ?? order.id).slice(0, 8)}`,
+    orders: ordersResult.data.map((order) => ({
+      id: `#${order.id.slice(0, 8)}`,
       fullId: order.id,
       createdAt: new Date(order.created_at),
       // A line without a product_id is a custom item (or a since-deleted product).
-      lines: order.order_items.map((item) => ({
-        id: item.id,
-        name: item.product_name,
-        quantity: item.quantity,
-        unitPrice: Number(item.unit_price),
-        custom: item.product_id === null,
-        refundedQuantity: (item.refund_items ?? []).reduce((sum, refunded) => sum + refunded.quantity, 0),
-      })),
+      lines: order.order_items.map((item) => ({ name: item.product_name, quantity: item.quantity, unitPrice: Number(item.unit_price), custom: item.product_id === null })),
       items: order.order_items.reduce((sum, item) => sum + item.quantity, 0),
       total: Number(order.total),
       time: new Date(order.created_at).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
@@ -343,14 +310,10 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       changeDue: order.change_due === null ? null : Number(order.change_due),
       employeeName: order.employee_name || "Former employee",
       isWholesale: order.is_wholesale,
-      status: order.status ?? "completed",
-      refundedTotal: Number(order.refunded_total ?? 0),
-      voidReason: order.void_reason ?? null,
     })),
     stats,
     salesChart,
     shortfalls,
-    storeDetails,
   };
 }
 
@@ -526,17 +489,6 @@ export default function Home() {
   const [shortfalls, setShortfalls] = useState<StockShortfall[]>([]);
   const [showSyncPanel, setShowSyncPanel] = useState(false);
   const syncingRef = useRef(false);
-  const [storeDetails, setStoreDetails] = useState<StoreDetails>(defaultStoreDetails);
-  const [hardware, setHardware] = useState<HardwareSettings>(defaultHardwareSettings);
-  const [cashSession, setCashSession] = useState<CashSession | null>(null);
-  const [showOpenDrawer, setShowOpenDrawer] = useState(false);
-  const [showCashCount, setShowCashCount] = useState(false);
-  const [voidTarget, setVoidTarget] = useState<Order | null>(null);
-  const [refundTarget, setRefundTarget] = useState<Order | null>(null);
-  // Signed in offline (password checked on this device): there is no Supabase
-  // session until the cashier reconnects with their password.
-  const [offlineSession, setOfflineSession] = useState(false);
-  const [sessionOutboxCount, setSessionOutboxCount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [showAddEmployee, setShowAddEmployee] = useState(false);
@@ -610,7 +562,6 @@ export default function Home() {
     setDashboardStats(workspace.stats);
     setSalesChart(workspace.salesChart);
     setShortfalls(workspace.shortfalls ?? []);
-    if (workspace.storeDetails) setStoreDetails(workspace.storeDetails);
     setUsingCachedData(fromCache);
     if (!fromCache) setServerUnreachable(false);
     if (!fromCache) {
@@ -691,7 +642,6 @@ export default function Home() {
     const { data: { subscription } } = createClient().auth.onAuthStateChange((event) => {
       if (event === "SIGNED_OUT" && !cancelled) {
         setSignedIn(false);
-        setOfflineSession(false);
         setUserId(null);
         setCart({});
         setCustomItems([]);
@@ -709,13 +659,6 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [notice, noticeIsSuccess, showCheckoutDialog]);
 
-  // This till's printer/drawer settings and its open cash drawer session.
-  useEffect(() => {
-    setHardware(loadHardwareSettings());
-    void readCurrentSession().then(setCashSession).catch(() => undefined);
-    void readSessionOutbox().then((outbox) => setSessionOutboxCount(outbox.length)).catch(() => undefined);
-  }, []);
-
   // Online/offline drives the banner, the sync indicator and the sync engine.
   useEffect(() => {
     const update = () => setIsOnline(navigator.onLine);
@@ -729,10 +672,10 @@ export default function Home() {
   }, []);
 
   const refreshWorkspace = useCallback(async (period = salesPeriod) => {
-    if (!userId || offlineSession) return; // no Supabase session yet
+    if (!userId) return;
     const workspace = await fetchWorkspaceData(role === "admin", period);
     applyWorkspace(workspace, userId);
-  }, [applyWorkspace, offlineSession, role, salesPeriod, userId]);
+  }, [applyWorkspace, role, salesPeriod, userId]);
 
   // Uploads queued offline sales, oldest first. A sale leaves the queue only
   // after Supabase confirms it; the server ignores a sale it already has, so
@@ -740,13 +683,12 @@ export default function Home() {
   // failed (retried only on request). Employees sync their own sales; an
   // admin can sync everyone's queued on this computer.
   const syncPendingOrders = useCallback(async ({ retryFailed = false, quiet = false } = {}) => {
-    if (syncingRef.current || !userId || offlineSession || !navigator.onLine) return;
+    if (syncingRef.current || !userId || !navigator.onLine) return;
     syncingRef.current = true;
     setIsSyncing(true);
     let synced = 0;
     let shortfallCount = 0;
     let failed = 0;
-    let stalled = false;
     try {
       const queue = await listPendingOrders();
       const supabase = createClient();
@@ -764,12 +706,10 @@ export default function Home() {
           p_payment_reference_last4: sale.paymentReferenceLast4,
           p_cash_received: sale.cashReceived,
           p_wholesale: sale.wholesale,
-          p_cash_session_id: sale.cashSessionId ?? null,
         }).single();
         if (error) {
           if (isTransientSyncError(error)) {
             if (isNetworkError(error)) setServerUnreachable(true);
-            stalled = true;
             break; // try again later
           }
           failed += 1;
@@ -781,37 +721,9 @@ export default function Home() {
         synced += 1;
         if (data && typeof data === "object" && "shortfalls" in data) shortfallCount += Number(data.shortfalls) || 0;
       }
-
-      // Drawer sessions go after the sales, so the database's expected-cash
-      // check includes every synced sale; skipped if sales are still waiting.
-      if (!stalled) {
-        for (const session of await readSessionOutbox()) {
-          const owner = session.closed?.closedBy ?? session.openedBy;
-          if (session.openedBy !== userId && owner !== userId && role !== "admin") continue;
-          const { error } = await supabase.rpc("sync_cash_session", {
-            p_id: session.id,
-            p_opened_by: session.openedBy,
-            p_opened_at: session.openedAt,
-            p_opening_float: session.openingFloat,
-            p_device_label: session.deviceLabel,
-            p_closed_by: session.closed?.closedBy ?? null,
-            p_closed_at: session.closed?.closedAt ?? null,
-            p_counted_cash: session.closed?.countedCash ?? null,
-            p_expected_cash: session.closed?.expectedCash ?? null,
-            p_denominations: session.closed?.denominations ?? {},
-            p_notes: session.closed?.notes ?? "",
-          });
-          if (error) {
-            if (isNetworkError(error)) setServerUnreachable(true);
-            break; // kept in the outbox; retried on the next sync
-          }
-          await removeFromSessionOutbox(session.id);
-        }
-      }
     } catch (error) {
       if (!quiet) setNotice(`Couldn’t sync offline sales: ${error instanceof Error ? error.message : "Unknown error"}`);
     } finally {
-      setSessionOutboxCount((await readSessionOutbox().catch(() => [])).length);
       setPendingOrders(await listPendingOrders().catch(() => []));
       syncingRef.current = false;
       setIsSyncing(false);
@@ -825,7 +737,7 @@ export default function Home() {
       }
     }
     if (failed) setNotice(`${failed} offline sale${failed === 1 ? "" : "s"} couldn’t be synced and ${failed === 1 ? "is" : "are"} kept on this computer. Open the sync status for details.`);
-  }, [offlineSession, refreshWorkspace, role, userId]);
+  }, [refreshWorkspace, role, userId]);
 
   const pendingForThisUser = useMemo(() => pendingOrders.filter((sale) => sale.employeeId === userId || role === "admin"), [pendingOrders, role, userId]);
   const waitingToSync = pendingForThisUser.filter((sale) => !sale.failed).length;
@@ -836,7 +748,7 @@ export default function Home() {
   // copy, or sales are waiting: every 30 s (and right away when the device
   // reports a network), reload fresh data, then upload queued sales.
   const connected = isOnline && !serverUnreachable;
-  const needsReconnect = signedIn && !offlineSession && (serverUnreachable || usingCachedData || waitingToSync > 0 || sessionOutboxCount > 0);
+  const needsReconnect = signedIn && (serverUnreachable || usingCachedData || waitingToSync > 0);
   useEffect(() => {
     if (!needsReconnect) return;
     const attempt = async () => {
@@ -1045,10 +957,6 @@ export default function Home() {
     else if (confirmAction) setConfirmAction(null);
     else if (passwordEmployee) setPasswordEmployee(null);
     else if (showSyncPanel) setShowSyncPanel(false);
-    else if (showOpenDrawer) setShowOpenDrawer(false);
-    else if (showCashCount) setShowCashCount(false);
-    else if (voidTarget) setVoidTarget(null);
-    else if (refundTarget) setRefundTarget(null);
     else if (showMobileCart) setShowMobileCart(false);
     else if (showNotifications) setShowNotifications(false);
     else return false;
@@ -1059,7 +967,7 @@ export default function Home() {
     if (!signedIn || event.defaultPrevented || event.isComposing) return;
     const target = event.target as HTMLElement | null;
     const inTextField = !!target?.closest("input, textarea, select, [contenteditable='true']");
-    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport || !!confirmAction || !!passwordEmployee || showSyncPanel || showOpenDrawer || showCashCount || !!voidTarget || !!refundTarget;
+    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport || !!confirmAction || !!passwordEmployee || showSyncPanel;
     const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
 
     if (event.key === "Escape") {
@@ -1196,7 +1104,6 @@ export default function Home() {
       cashReceived: receivedAmount,
       wholesale: wholesaleMode,
       total,
-      cashSessionId: cashSession?.id ?? null,
       attempts: 0,
       lastError: null,
       failed: false,
@@ -1206,7 +1113,7 @@ export default function Home() {
       setIsLoading(false);
       return;
     }
-    if (!navigator.onLine || offlineSession) {
+    if (!navigator.onLine) {
       await saveSaleOffline(sale);
       setIsLoading(false);
       return;
@@ -1223,7 +1130,6 @@ export default function Home() {
         p_cash_received: receivedAmount,
         p_wholesale: wholesaleMode,
         p_client_order_id: sale.clientOrderId,
-        p_cash_session_id: sale.cashSessionId,
       }).single();
       if (error && isNetworkError(error)) {
         await saveSaleOffline(sale);
@@ -1233,8 +1139,7 @@ export default function Home() {
       if (!data || typeof data !== "object" || !("order_id" in data) || typeof data.order_id !== "string") {
         throw new Error("Checkout completed, but the order confirmation was invalid.");
       }
-      const newOrderId = sale.clientOrderId.slice(0, 8);
-      void afterSale(sale, false);
+      const newOrderId = data.order_id.slice(0, 8);
       const wasWholesale = wholesaleMode;
       clearOrder();
       setShowCheckoutDialog(false);
@@ -1248,232 +1153,13 @@ export default function Home() {
       }
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && (error.code === "PGRST202" || error.code === "42883")) {
-        setNotice("Checkout needs the latest database update. Apply the migrations in supabase/migrations (through 202610120013_refunds_cash_drawer_receipts.sql), then retry.");
+        setNotice("Checkout needs the latest database update. Apply the migrations in supabase/migrations (through 202610120012_offline_sales_sync.sql), then retry.");
       } else {
         setNotice(error instanceof Error ? error.message : error && typeof error === "object" && "message" in error ? String(error.message) : "Unable to complete checkout.");
       }
     } finally {
       setIsLoading(false);
     }
-  }
-
-  function saleReceiptHtml(order: Order, reprint: boolean) {
-    return buildSaleReceipt(storeDetails, {
-      orderNumber: order.id,
-      createdAt: order.createdAt,
-      cashier: order.employeeName,
-      lines: order.lines,
-      total: order.total,
-      paymentMethod: order.paymentMethod,
-      paymentReferenceLast4: order.paymentReferenceLast4,
-      cashReceived: order.cashReceived,
-      changeDue: order.changeDue,
-      wholesale: order.isWholesale,
-      pendingSync: !!order.syncStatus,
-      status: order.status,
-      refundedTotal: order.refundedTotal,
-      reprint,
-    }, hardware.paperWidth);
-  }
-
-  async function printReceipt(order: Order, reprint: boolean) {
-    try {
-      await printDocument(saleReceiptHtml(order, reprint), hardware);
-    } catch (error) {
-      setNotice(`The receipt didn’t print: ${error instanceof Error ? error.message : "printer error"}. Check the printer in Account → Receipts & cash drawer.`);
-    }
-  }
-
-  async function openDrawer(manual = false) {
-    try {
-      const opened = await openCashDrawer(hardware);
-      if (manual && !opened) setNotice(hardware.drawerMode === "driver" ? "The drawer opens when a receipt prints (printer driver setting)." : "No cash drawer is set up on this computer. Set it up in Account → Receipts & cash drawer.");
-    } catch (error) {
-      setNotice(`The cash drawer didn’t open: ${error instanceof Error ? error.message : "drawer error"}`);
-    }
-  }
-
-  async function printTestReceipt() {
-    const sample: Order = {
-      id: "#TEST0001",
-      fullId: "test",
-      createdAt: new Date(),
-      lines: [{ name: "Test item", quantity: 2, unitPrice: 25, custom: false, refundedQuantity: 0 }],
-      items: 2,
-      total: 50,
-      time: "",
-      paymentMethod: "cash",
-      paymentReferenceLast4: null,
-      cashReceived: 100,
-      changeDue: 50,
-      employeeName: employeeName || "Team member",
-      isWholesale: false,
-      status: "completed",
-      refundedTotal: 0,
-      voidReason: null,
-    };
-    await printReceipt(sample, false);
-  }
-
-  async function saveStoreDetails(details: StoreDetails) {
-    try {
-      const { error } = await createClient().from("store_settings").update({
-        store_name: details.storeName.trim().slice(0, 80),
-        address: details.address.trim().slice(0, 200),
-        phone: details.phone.trim().slice(0, 40),
-        tin: details.tin.trim().slice(0, 40),
-        receipt_footer: details.receiptFooter.trim().slice(0, 200),
-        updated_at: new Date().toISOString(),
-      }).eq("id", 1);
-      if (error) throw error;
-      setStoreDetails(details);
-      setNotice("Store details updated. New receipts will use them.");
-    } catch (error) {
-      setNotice(productSaveError(error, "Unable to save the store details."));
-    }
-  }
-
-  // After a sale (online or saved offline): count it in the open drawer
-  // session, open the drawer for cash, and print the receipt if enabled.
-  async function afterSale(sale: PendingOrder, savedOffline: boolean) {
-    if (sale.cashSessionId) {
-      const updated = await recordInSession(sale.cashSessionId, sale.paymentMethod, sale.total, true).catch(() => null);
-      if (updated) setCashSession(updated);
-    }
-    if (sale.paymentMethod === "cash") void openDrawer();
-    if (hardware.autoPrint) {
-      const order = pendingToOrder(sale);
-      await printReceipt(savedOffline ? order : { ...order, syncStatus: undefined }, false);
-    }
-  }
-
-  // ---------- cash drawer sessions ----------
-
-  async function startDrawerSession(openingFloat: number) {
-    if (!userId) return;
-    try {
-      const session = await openSession({ openedBy: userId, openedByName: employeeName || "Team member", deviceLabel: hardware.deviceLabel, openingFloat });
-      setCashSession(session);
-      setSessionOutboxCount((await readSessionOutbox()).length);
-      setShowOpenDrawer(false);
-      setNotice(`Drawer opened with ${money(session.openingFloat)}. Cash sales are now counted for this shift.`);
-      void syncPendingOrders({ quiet: true });
-    } catch (error) {
-      setNotice(`Couldn’t start the drawer session: ${error instanceof Error ? error.message : "storage error"}`);
-    }
-  }
-
-  async function finishDrawerSession(count: { denominations: Record<string, number>; countedCash: number; notes: string; print: boolean }) {
-    if (!cashSession || !userId) return;
-    try {
-      const expected = expectedCash(cashSession);
-      const closedAt = new Date().toISOString();
-      const closed = await closeSession(cashSession, {
-        closedBy: userId,
-        closedByName: employeeName || "Team member",
-        closedAt,
-        countedCash: count.countedCash,
-        expectedCash: expected,
-        denominations: count.denominations,
-        notes: count.notes,
-      });
-      setCashSession(null);
-      setSessionOutboxCount((await readSessionOutbox()).length);
-      setShowCashCount(false);
-      const difference = Math.round((count.countedCash - expected) * 100) / 100;
-      setNotice(`Shift closed and saved. ${difference === 0 ? "The drawer balances." : difference > 0 ? `The drawer is over by ${money(difference)}.` : `The drawer is short by ${money(-difference)}.`}`);
-      if (count.print) {
-        const report = buildCashCountReport(storeDetails, {
-          deviceLabel: closed.deviceLabel,
-          openedBy: closed.openedByName,
-          closedBy: employeeName || "Team member",
-          openedAt: new Date(closed.openedAt),
-          closedAt: new Date(closedAt),
-          openingFloat: closed.openingFloat,
-          cashSales: closed.cashSales,
-          cashRefunds: closed.cashRefunds,
-          salesCount: closed.salesCount,
-          otherSales: Object.entries(closed.otherSales).filter(([, amount]) => amount !== 0).map(([method, amount]) => ({ method, amount })),
-          expected,
-          counted: count.countedCash,
-          denominations: Object.entries(count.denominations).map(([label, amount]) => ({ label, count: amount, value: Number(label.replace(/[^\d.]/g, "")) })),
-          notes: count.notes,
-        }, hardware.paperWidth);
-        void printDocument(report, hardware).catch((error: unknown) => setNotice(`The shift was saved, but the report didn’t print: ${error instanceof Error ? error.message : "printer error"}`));
-      }
-      void syncPendingOrders({ quiet: true });
-    } catch (error) {
-      setNotice(`Couldn’t close the drawer session: ${error instanceof Error ? error.message : "storage error"}`);
-    }
-  }
-
-  // ---------- voids and refunds (online only) ----------
-
-  async function afterMoneyReturned(method: string, amount: number) {
-    if (cashSession) {
-      const updated = await recordInSession(cashSession.id, method, -amount, false).catch(() => null);
-      if (updated) setCashSession(updated);
-    }
-    if (method === "cash") void openDrawer();
-  }
-
-  async function voidSale(order: Order, reason: string, printSlip: boolean) {
-    const { data, error } = await createClient().rpc("void_order", {
-      p_order_id: order.fullId,
-      p_reason: reason,
-      p_cash_session_id: cashSession?.id ?? null,
-    }).single();
-    if (error) throw error;
-    const amount = data && typeof data === "object" && "amount" in data ? Number(data.amount) : order.total;
-    await afterMoneyReturned(order.paymentMethod, amount);
-    setVoidTarget(null);
-    setNotice(`Sale ${order.id} voided. ${money(amount)} returned by ${paymentMethodLabel(order.paymentMethod)}; items were put back in stock.`);
-    if (printSlip) {
-      void printDocument(buildRefundReceipt(storeDetails, {
-        orderNumber: order.id,
-        kind: "void",
-        createdAt: new Date(),
-        processedBy: employeeName,
-        lines: order.lines,
-        amount,
-        method: order.paymentMethod,
-        reason,
-        restocked: true,
-      }, hardware.paperWidth), hardware).catch(() => undefined);
-    }
-    await refreshWorkspace().catch(() => undefined);
-  }
-
-  async function refundSale(order: Order, refund: { lines: { id: string; quantity: number }[]; reason: string; restock: boolean; method: PaymentMethod; printSlip: boolean }) {
-    const { data, error } = await createClient().rpc("refund_order", {
-      p_order_id: order.fullId,
-      p_items: refund.lines.map((line) => ({ order_item_id: line.id, quantity: line.quantity })),
-      p_reason: refund.reason,
-      p_restock: refund.restock,
-      p_method: refund.method,
-      p_cash_session_id: cashSession?.id ?? null,
-      p_client_refund_id: crypto.randomUUID(),
-    }).single();
-    if (error) throw error;
-    const amount = data && typeof data === "object" && "amount" in data ? Number(data.amount) : 0;
-    await afterMoneyReturned(refund.method, amount);
-    setRefundTarget(null);
-    setNotice(`Refund of ${money(amount)} for ${order.id} recorded${refund.restock ? "; items were put back in stock" : ""}.`);
-    if (refund.printSlip) {
-      const byId = new Map(order.lines.map((line) => [line.id, line]));
-      void printDocument(buildRefundReceipt(storeDetails, {
-        orderNumber: order.id,
-        kind: "refund",
-        createdAt: new Date(),
-        processedBy: employeeName,
-        lines: refund.lines.map((line) => ({ name: byId.get(line.id)?.name ?? "Item", quantity: line.quantity, unitPrice: byId.get(line.id)?.unitPrice ?? 0 })),
-        amount,
-        method: refund.method,
-        reason: refund.reason,
-        restocked: refund.restock,
-      }, hardware.paperWidth), hardware).catch(() => undefined);
-    }
-    await refreshWorkspace().catch(() => undefined);
   }
 
   // Records a sale on this computer to sync later. The sale is on disk before
@@ -1492,14 +1178,13 @@ export default function Home() {
     const updatedProducts = products.map((product) => (sold.has(product.id) ? { ...product, stock: Math.max(0, product.stock - (sold.get(product.id) ?? 0)) } : product));
     setProducts(updatedProducts);
     if (userId) {
-      void writeCache(`workspace:${userId}`, { products: updatedProducts, orders, stats: dashboardStats, salesChart, shortfalls, storeDetails } satisfies Workspace).catch(() => undefined);
+      void writeCache(`workspace:${userId}`, { products: updatedProducts, orders, stats: dashboardStats, salesChart, shortfalls } satisfies Workspace).catch(() => undefined);
     }
     clearOrder();
     setShowCheckoutDialog(false);
     setCashReceived("");
     setPaymentReferenceLast4("");
     setNotice(`Sale #${sale.clientOrderId.slice(0, 8)} saved offline on this computer. It will sync automatically when the connection is back.`);
-    void afterSale(sale, true);
   }
 
   async function signIn(event: FormEvent<HTMLFormElement>) {
@@ -1526,62 +1211,14 @@ export default function Home() {
       }
       const workspace = await fetchWorkspaceData(profile.role === "admin", salesPeriod);
       signInWith(authData.user.id, { role: profile.role, fullName: profile.full_name || "", email: authData.user.email ?? "" }, workspace, false);
-      setOfflineSession(false);
       setActivePage(profile.role === "admin" ? "dashboard" : "pos");
-      // Lets this person sign in here offline later (password verifier only).
-      void rememberOfflineCredential(authData.user.id, email, password).catch(() => undefined);
     } catch (error) {
-      if (isNetworkError(error)) {
-        await signInOffline(email, password);
-        return;
-      }
-      setAuthError(error instanceof Error ? error.message : "Unable to sign in.");
+      setAuthError(isNetworkError(error)
+        ? "You’re offline. Signing in needs an internet connection; a cashier who’s already signed in on this computer can keep selling offline."
+        : error instanceof Error ? error.message : "Unable to sign in.");
     } finally {
       setIsLoading(false);
     }
-  }
-
-  // Supabase is unreachable: check the password against this device's saved
-  // verifier and open the saved workspace. Sales are queued until the cashier
-  // reconnects online.
-  async function signInOffline(email: string, password: string) {
-    try {
-      const result = await verifyOfflineCredential(email, password);
-      if ("error" in result) {
-        setAuthError(result.error);
-        return;
-      }
-      const [profile, workspace] = await Promise.all([
-        readCache<CachedProfile>(`profile:${result.userId}`),
-        readCache<Workspace>(`workspace:${result.userId}`),
-      ]);
-      if (!profile || !workspace) {
-        setAuthError("You’re offline, and this computer has no saved store data for your account yet. Connect to the internet to sign in.");
-        return;
-      }
-      signInWith(result.userId, profile, workspace, true);
-      setOfflineSession(true);
-      setServerUnreachable(true);
-      setActivePage(profile.role === "admin" ? "dashboard" : "pos");
-    } catch (error) {
-      setAuthError(`Offline sign-in failed: ${error instanceof Error ? error.message : "storage error"}`);
-    }
-  }
-
-  // Back online after an offline sign-in: one password entry creates the real
-  // Supabase session, then queued sales sync.
-  async function reconnectOnline(password: string) {
-    const supabase = createClient();
-    const { data, error } = await supabase.auth.signInWithPassword({ email: accountEmail, password });
-    if (error) throw error;
-    if (data.user.id !== userId) {
-      await supabase.auth.signOut({ scope: "local" });
-      throw new Error("That password belongs to a different account.");
-    }
-    void rememberOfflineCredential(data.user.id, accountEmail, password).catch(() => undefined);
-    setOfflineSession(false);
-    setServerUnreachable(false);
-    setNotice("Reconnected. Syncing your offline sales…");
   }
 
   async function addProduct(event: FormEvent<HTMLFormElement>) {
@@ -1879,8 +1516,7 @@ export default function Home() {
   async function performSignOut() {
     const supabase = createClient();
     // Local scope: signs out this device only, not the account everywhere.
-    // An offline sign-in has no Supabase session to end.
-    const { error } = offlineSession ? { error: null } : await supabase.auth.signOut({ scope: "local" });
+    const { error } = await supabase.auth.signOut({ scope: "local" });
     if (error) {
       if (!isNetworkError(error)) {
         setNotice(`Unable to sign out: ${error.message}`);
@@ -1892,7 +1528,6 @@ export default function Home() {
       return;
     }
     setSignedIn(false);
-    setOfflineSession(false);
     setUserId(null);
     setActivePage("pos");
     setCart({});
@@ -2250,7 +1885,6 @@ export default function Home() {
       <div className="flex min-h-screen">
         <div className="min-w-0 flex-1">
           <header className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
-            {offlineSession && isOnline && <ReconnectBanner email={accountEmail} onReconnect={reconnectOnline} />}
             {!connected && <OfflineBanner signedIn waiting={waitingToSync} />}
             <div className="flex h-[72px] items-center gap-3 px-4 sm:px-7 xl:px-9">
             <div className="shrink-0 xl:hidden"><Brand compact /></div>
@@ -2265,7 +1899,6 @@ export default function Home() {
                 <Clock3 size={14} className="text-slate-400" />
                 {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
               </div>
-              <DrawerStatusButton session={cashSession} onOpen={() => setShowOpenDrawer(true)} onCount={() => setShowCashCount(true)} />
               <SyncStatusButton isOnline={connected} isSyncing={isSyncing} waiting={waitingToSync} failed={failedToSync} onClick={() => setShowSyncPanel(true)} />
               <div className="relative">
                 <button type="button" aria-label="Notifications" aria-expanded={showNotifications} onClick={() => setShowNotifications((current) => !current)} className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800">
@@ -2369,11 +2002,6 @@ export default function Home() {
                 onSetPassword={setPasswordEmployee}
               />
             ) : currentView === "account" ? (
-              <>
-              <section className="mx-auto mb-5 max-w-3xl space-y-5">
-                <HardwareSettingsCard settings={hardware} onChange={(settings) => { setHardware(settings); saveHardwareSettings(settings); }} onTestPrint={() => void printTestReceipt()} onTestDrawer={() => void openDrawer(true)} />
-                <StoreDetailsCard details={storeDetails} canEdit={isAdmin && connected && !offlineSession} onSave={saveStoreDetails} />
-              </section>
               <AccountView
                 email={accountEmail}
                 name={accountName}
@@ -2386,7 +2014,6 @@ export default function Home() {
                 onUpdateName={updateAccountName}
                 onResetSalesHistory={resetSalesHistory}
               />
-              </>
             ) : currentView === "inventory" && isAdmin ? (
               <InventoryView
                 products={products}
@@ -2405,7 +2032,7 @@ export default function Home() {
                 onRestock={setRestockProduct}
               />
             ) : currentView === "orders" ? (
-              <OrdersView orders={displayOrders} isAdmin={isAdmin} userName={employeeName} connected={connected && !offlineSession} onPrint={(order) => void printReceipt(order, true)} onVoid={setVoidTarget} onRefund={setRefundTarget} />
+              <OrdersView orders={displayOrders} />
             ) : currentView === "shifts" ? (
               <ShiftHistoryView isAdmin={isAdmin} />
             ) : (
@@ -2444,12 +2071,6 @@ export default function Home() {
                     </div>
                   </div>
 
-                  {!cashSession && (
-                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-100">
-                      <span><b className="font-semibold">Start your shift:</b> count the opening cash so the drawer can be balanced at the end of the shift.</span>
-                      <button type="button" onClick={() => setShowOpenDrawer(true)} className="h-8 rounded-lg bg-blue-600 px-3 font-semibold text-white hover:bg-blue-700">Start shift</button>
-                    </div>
-                  )}
                   <div className="mb-5 flex flex-wrap items-center gap-2">
                     {productCategories.length > 1 && (
                       <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1" aria-label="Filter by category">
@@ -2649,10 +2270,6 @@ export default function Home() {
         </div>
       )}
       {quickAdd && <QuickAddDialog initial={quickAdd} onAdd={addCustomItem} onClose={() => setQuickAdd(null)} />}
-      {showOpenDrawer && <OpenDrawerDialog deviceLabel={hardware.deviceLabel} onOpen={startDrawerSession} onClose={() => setShowOpenDrawer(false)} />}
-      {showCashCount && cashSession && <CashCountDialog session={cashSession} onConfirm={finishDrawerSession} onClose={() => setShowCashCount(false)} onOpenDrawer={() => void openDrawer(true)} />}
-      {voidTarget && <VoidDialog order={voidTarget} onConfirm={(reason, printSlip) => voidSale(voidTarget, reason, printSlip)} onClose={() => setVoidTarget(null)} />}
-      {refundTarget && <RefundDialog order={refundTarget} onConfirm={(refund) => refundSale(refundTarget, refund)} onClose={() => setRefundTarget(null)} />}
       {showSyncPanel && <SyncPanel sales={pendingOrders} isOnline={isOnline} isSyncing={isSyncing} currentUserId={userId} isAdmin={isAdmin} onSync={(retryFailed) => void syncPendingOrders({ retryFailed })} onClose={() => setShowSyncPanel(false)} />}
       {confirmAction && <ConfirmDialog action={confirmAction} isWorking={isLoading} onConfirm={() => void runConfirmAction()} onCancel={() => setConfirmAction(null)} />}
       {passwordEmployee && (
@@ -2884,19 +2501,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">What happens when the internet goes down?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Keep selling. If you were signed in, checkout keeps working with the products last loaded on this computer. Each sale is saved on this computer and syncs to the store database automatically when the connection returns; the cloud icon in the top bar shows how many are waiting. A sale is never recorded twice. Anyone who signed in online on this computer in the last 30 days can also sign in offline; when the connection returns, enter your password once in the blue bar to reconnect and sync. Voids, refunds, inventory and employee changes, and reports need a connection. If offline sales sold more than the recorded stock, admins see a “Recount needed” list in Inventory.</p>
-          </details>
-          <details className="py-3">
-            <summary className="cursor-pointer text-sm font-semibold">How do I void a sale or give a refund?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Open Orders, then the sale’s ⋮ Actions menu. Void sale cancels the whole sale and puts every item back in stock; cashiers can void their own sales within 30 minutes, admins any time. Refund items (admins) returns some or all items, with the option to restock them and to return the money by cash, e-wallet or card. Reports show sales after refunds.</p>
-          </details>
-          <details className="py-3">
-            <summary className="cursor-pointer text-sm font-semibold">How do I set up the receipt printer and cash drawer?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Go to Account → Receipts &amp; cash drawer on each till. Pick the printer and paper width, and choose how the drawer opens: through the printer driver, a network receipt printer, or a shared Windows printer (desktop app). Use the test buttons to check. Admins set the store name, address and receipt message under Store details. Reprint any receipt from Orders → ⋮ → Print receipt.</p>
-          </details>
-          <details className="py-3">
-            <summary className="cursor-pointer text-sm font-semibold">How do I count the drawer at the end of a shift?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Start the shift with the wallet icon in the top bar and enter the opening cash. Cash sales and cash refunds on that computer are added up. At the end, click the wallet icon again, enter how many of each note and coin are in the drawer, and close the shift: you’ll see whether the drawer is balanced, over or short, and can print the shift report. Admins see every count under Shifts → Cash counts. Works offline.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Keep selling. If you were signed in, checkout keeps working with the products last loaded on this computer. Each sale is saved on this computer and syncs to the store database automatically when the connection returns; the cloud icon in the top bar shows how many are waiting. A sale is never recorded twice. Signing in, inventory and employee changes, and reports need a connection. If offline sales sold more than the recorded stock, admins see a “Recount needed” list in Inventory.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I sell something that isn’t in my products?</summary>
@@ -3743,13 +3348,6 @@ function OrderStatusBadge({ order }: { order: Order }) {
   if (order.syncStatus === "pending") {
     return <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-semibold text-amber-700 dark:bg-amber-950 dark:text-amber-300"><CloudUpload size={11} /> Pending sync</span>;
   }
-  if (order.status === "voided") {
-    return <span title={order.voidReason ?? undefined} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold text-slate-600 line-through decoration-slate-400 dark:bg-slate-800 dark:text-slate-300"><VoidIcon size={11} /> Voided</span>;
-  }
-  if (order.refundedTotal > 0) {
-    const full = order.refundedTotal >= order.total;
-    return <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 px-2.5 py-1 text-[10px] font-semibold text-violet-700 dark:bg-violet-950 dark:text-violet-300"><RefundIcon size={11} /> {full ? "Refunded" : `Partly refunded · ${money(order.refundedTotal)}`}</span>;
-  }
   return <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"><Check size={11} /> Completed</span>;
 }
 
@@ -3758,15 +3356,7 @@ const orderDateTime = (date: Date) => ({
   time: date.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
 });
 
-function OrdersView({ orders, isAdmin, userName, connected, onPrint, onVoid, onRefund }: {
-  orders: Order[];
-  isAdmin: boolean;
-  userName: string;
-  connected: boolean;
-  onPrint: (order: Order) => void;
-  onVoid: (order: Order) => void;
-  onRefund: (order: Order) => void;
-}) {
+function OrdersView({ orders }: { orders: Order[] }) {
   const [paymentFilter, setPaymentFilter] = useState<"all" | PaymentMethod>("all");
   const [detailsOrder, setDetailsOrder] = useState<Order | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -3817,13 +3407,6 @@ function OrdersView({ orders, isAdmin, userName, connected, onPrint, onVoid, onR
                             <DropdownMenuLabel className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Actions</DropdownMenuLabel>
                             <DropdownMenuItem onSelect={() => setDetailsOrder(order)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><ReceiptText /> View details</DropdownMenuItem>
                             <DropdownMenuItem onSelect={() => void copyOrderId(order)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><ClipboardList /> Copy order number</DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => onPrint(order)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><Printer /> Print receipt</DropdownMenuItem>
-                            {!order.syncStatus && order.status !== "voided" && (isAdmin || (order.employeeName === userName && Date.now() - order.createdAt.getTime() < 30 * 60_000)) && order.refundedTotal === 0 && (
-                              <DropdownMenuItem disabled={!connected} onSelect={() => onVoid(order)} className="cursor-pointer rounded-lg text-xs text-red-600 focus:bg-red-50 focus:text-red-700 dark:focus:bg-slate-800"><VoidIcon /> Void sale{connected ? "" : " (needs connection)"}</DropdownMenuItem>
-                            )}
-                            {isAdmin && !order.syncStatus && order.status !== "voided" && order.refundedTotal < order.total && (
-                              <DropdownMenuItem disabled={!connected} onSelect={() => onRefund(order)} className="cursor-pointer rounded-lg text-xs text-red-600 focus:bg-red-50 focus:text-red-700 dark:focus:bg-slate-800"><RefundIcon /> Refund items{connected ? "" : " (needs connection)"}</DropdownMenuItem>
-                            )}
                           </DropdownMenuContent>
                         </DropdownMenu>
                       </td>
