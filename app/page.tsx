@@ -696,6 +696,22 @@ export default function Home() {
     F3: () => choosePaymentMethod("card"),
   }, showCheckoutDialog && !showHelpCenter && !isLoading);
 
+  // Auto-add: once the entry ("24/<barcode>" or a bare barcode) exactly matches
+  // a product's barcode and input has paused, add it without waiting for Enter.
+  // The pause lets a scanner finish typing, so a shorter barcode that prefixes
+  // a longer one isn't matched mid-scan. Enter within the pause adds it first
+  // and clears the entry, which cancels this timer.
+  const submitSaleEntryRef = useRef(submitSaleEntry);
+  useEffect(() => {
+    submitSaleEntryRef.current = submitSaleEntry;
+  });
+  const entryMatchesBarcode = !!searchTerm && products.some((product) => product.barcode === searchTerm);
+  useEffect(() => {
+    if (activePage !== "pos" || !entryMatchesBarcode) return;
+    const timer = window.setTimeout(() => submitSaleEntryRef.current(), 150);
+    return () => window.clearTimeout(timer);
+  }, [activePage, entryMatchesBarcode, search]);
+
   const shortcutHandlerRef = useRef(handleShortcut);
   useEffect(() => {
     shortcutHandlerRef.current = handleShortcut;
