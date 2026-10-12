@@ -170,18 +170,17 @@ ${worksheet("Breakdown", breakdownRows)}
             {isLoading ? (
               <div className="grid h-52 place-items-center rounded-xl bg-slate-50 text-sm text-slate-400 dark:bg-slate-800">Loading report…</div>
             ) : (
-              <div className="rounded-xl bg-slate-50 px-3 py-4 dark:bg-slate-800 sm:px-5">
-                <SmoothLineChart
-                  labels={rows.map((row) => row.label)}
-                  series={[
-                    { name: "Revenue", color: "#3b82f6", values: rows.map((row) => row.revenue) },
-                    { name: "Estimated net profit", color: "#10b981", values: rows.map((row) => row.netProfit) },
-                  ]}
-                  valueFormat={money}
-                />
-              </div>
+              <SmoothLineChart
+                labels={rows.map((row) => row.label)}
+                series={[
+                  { name: "Revenue", color: "#3b82f6", values: rows.map((row) => row.revenue) },
+                  { name: "Estimated net profit", color: "#059669", values: rows.map((row) => row.netProfit) },
+                ]}
+                valueFormat={(value) => new Intl.NumberFormat("en-PH", { notation: "compact", maximumFractionDigits: 1 }).format(value)}
+                tooltipFormat={money}
+              />
             )}
-            <div className="mt-2 flex gap-4 text-[10px] text-slate-500"><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-blue-500" />Revenue</span><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-emerald-500" />Estimated net profit</span></div>
+            <div className="mt-2 flex gap-4 text-[10px] text-slate-500"><span className="flex items-center gap-1.5"><span className="h-0.5 w-3 rounded-full bg-[#3b82f6]" />Revenue</span><span className="flex items-center gap-1.5"><span className="h-0.5 w-3 rounded-full bg-[#059669]" />Estimated net profit</span></div>
           </div>
 
           <div className="mt-7 overflow-hidden rounded-xl border border-slate-100 dark:border-slate-800">

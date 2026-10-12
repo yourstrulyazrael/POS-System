@@ -5,6 +5,7 @@ import {
   BarChart3,
   Bell,
   Boxes,
+  CalendarClock,
   Check,
   ChevronDown,
   CircleDollarSign,
@@ -22,6 +23,7 @@ import {
   Plus,
   ReceiptText,
   RefreshCw,
+  ScanBarcode,
   Search,
   ShieldCheck,
   ShoppingBag,
@@ -40,6 +42,8 @@ import { createClient } from "@/lib/supabase/client";
 import { ThemeSwitcher } from "@/components/theme-switcher";
 import { AnalyticsReportsView } from "@/components/analytics-reports";
 import { SmoothLineChart } from "@/components/smooth-line-chart";
+import { ShiftHistoryView } from "@/components/shift-history";
+import { useBarcodeScanner } from "@/lib/use-barcode-scanner";
 import { FormEvent, useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import Link from "next/link";
 import Image from "next/image";
@@ -57,6 +61,7 @@ type Product = {
   stock: number;
   imageIcon: string;
   imageUrl: string | null;
+  barcode: string | null;
   emoji: string;
   color: string;
 };
@@ -80,7 +85,7 @@ type ProfitReportRow = {
   orders_with_cost: number | string;
   orders_without_cost: number | string;
 };
-type ProductRow = { id: string; name: string; category: string; cost_price: number; cost_price_known: boolean; wholesale_price: number; price: number; stock: number; image_icon: string | null; image_url: string | null };
+type ProductRow = { id: string; name: string; category: string; cost_price: number; cost_price_known: boolean; wholesale_price: number; price: number; stock: number; image_icon: string | null; image_url: string | null; barcode: string | null };
 type OrderRow = {
   id: string;
   total: number;
@@ -173,7 +178,7 @@ function productAppearance(name: string, category: string, index: number, imageI
 async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod = "today") {
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
-    supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url").eq("active", true).order("name").returns<ProductRow[]>(),
+    supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url, barcode").eq("active", true).order("name").returns<ProductRow[]>(),
     supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, order_items(quantity)").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   if (productsResult.error) throw new Error(`Unable to load products: ${productsResult.error.message}`);
@@ -221,6 +226,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       price: Number(product.price),
       imageIcon: product.image_icon ?? "auto",
       imageUrl: product.image_url,
+      barcode: product.barcode,
       ...productAppearance(product.name, product.category, index, product.image_icon ?? "auto"),
     })),
     orders: ordersResult.data.map((order) => ({
@@ -291,6 +297,22 @@ function parseProductCsv(content: string) {
   return validateImportedProducts(records);
 }
 
+// Barcodes are stored as scanned: 1–64 printable ASCII characters, no spaces.
+// Returns null for an empty value and undefined for an invalid one.
+function normalizeBarcode(value: unknown) {
+  if (value === undefined || value === null) return null;
+  const barcode = String(value).trim();
+  if (!barcode) return null;
+  return /^[!-~]{1,64}$/.test(barcode) ? barcode : undefined;
+}
+
+function productSaveError(error: unknown, fallback: string) {
+  if (error && typeof error === "object" && "code" in error && error.code === "23505" && "message" in error && String(error.message).includes("barcode")) {
+    return "Another active product already uses that barcode.";
+  }
+  return error instanceof Error ? error.message : error && typeof error === "object" && "message" in error ? String(error.message) : fallback;
+}
+
 function validateImportedProducts(value: unknown[]) {
   return value.map((record, index) => {
     if (!record || typeof record !== "object" || Array.isArray(record)) {
@@ -305,6 +327,10 @@ function validateImportedProducts(value: unknown[]) {
     const price = Number(item.retail_price ?? item.price);
     const stock = Number(item.stock);
     const imageIcon = typeof item.image_icon === "string" ? item.image_icon.trim() : "auto";
+    const barcode = normalizeBarcode(item.barcode);
+    if (barcode === undefined) {
+      throw new Error(`Product row ${index + 1} has an invalid barcode. Use up to 64 letters, digits, or symbols without spaces.`);
+    }
     if (
       !name ||
       name.length > 120 ||
@@ -330,6 +356,7 @@ function validateImportedProducts(value: unknown[]) {
       price,
       stock,
       image_icon: imageIcon,
+      ...(barcode ? { barcode } : {}),
     };
   });
 }
@@ -356,7 +383,7 @@ export default function Home() {
   const [readNotifications, setReadNotifications] = useState<string[]>([]);
   const [category, setCategory] = useState("All items");
   const [search, setSearch] = useState("");
-  const [activePage, setActivePage] = useState<"dashboard" | "analytics" | "pos" | "inventory" | "orders" | "employees" | "account">("pos");
+  const [activePage, setActivePage] = useState<"dashboard" | "analytics" | "pos" | "inventory" | "orders" | "shifts" | "employees" | "account">("pos");
   const [showAddProduct, setShowAddProduct] = useState(false);
   const [editingProductPrices, setEditingProductPrices] = useState<Product | null>(null);
   const [selectedProductIcon, setSelectedProductIcon] = useState("auto");
@@ -388,7 +415,7 @@ export default function Home() {
       products.filter(
         (product) =>
           (category === "All items" || product.category === category) &&
-          product.name.toLowerCase().includes(search.toLowerCase()),
+          (product.name.toLowerCase().includes(search.toLowerCase()) || (!!search.trim() && product.barcode === search.trim())),
       ),
     [category, products, search],
   );
@@ -527,6 +554,26 @@ export default function Home() {
     setNotice("");
   }
 
+  function addScannedProduct(barcode: string) {
+    const product = products.find((item) => item.barcode === barcode);
+    if (!product) {
+      setNotice(`No product found for barcode ${barcode}.`);
+      return false;
+    }
+    if (product.stock < (cart[product.id] ?? 0) + 1) {
+      setNotice(`There isn’t enough stock for another ${product.name}.`);
+      return true;
+    }
+    setCart((current) => ({ ...current, [product.id]: (current[product.id] ?? 0) + 1 }));
+    setNotice(`Scanned ${product.name} — added to the order.`);
+    return true;
+  }
+
+  useBarcodeScanner(
+    addScannedProduct,
+    signedIn && activePage === "pos" && !showCheckoutDialog && !showAddProduct && !editingProductPrices && !editingProductImage && !showAddEmployee && !restockProduct && !showHelpCenter,
+  );
+
   function changeQuantity(productId: string, difference: number) {
     const product = products.find((item) => item.id === productId);
     if (difference > 0 && product && (cart[productId] ?? 0) + difference > product.stock) {
@@ -634,6 +681,11 @@ export default function Home() {
     const price = Number(formData.get("price"));
     const stock = Number(formData.get("stock"));
     const selectedCategory = String(formData.get("category") ?? sariSariCategories[0]);
+    const barcode = normalizeBarcode(formData.get("barcode"));
+    if (barcode === undefined) {
+      setNotice("Enter a barcode of up to 64 letters, digits, or symbols without spaces.");
+      return;
+    }
     if (selectedProductImage && (
       !["image/jpeg", "image/png", "image/webp"].includes(selectedProductImage.type) ||
       selectedProductImage.size > 5 * 1024 * 1024
@@ -677,6 +729,7 @@ export default function Home() {
         stock,
         image_icon: selectedProductIcon,
         image_url: imageUrl,
+        barcode,
       });
       if (error) throw error;
       productCreated = true;
@@ -695,7 +748,7 @@ export default function Home() {
         const { error: cleanupError } = await supabase.storage.from("product-images").remove([uploadedPath]);
         if (cleanupError) console.error("Unable to remove an unused product image:", cleanupError.message);
       }
-      setNotice(error instanceof Error ? error.message : "Unable to add product.");
+      setNotice(productSaveError(error, "Unable to add product."));
     }
   }
 
@@ -728,8 +781,13 @@ export default function Home() {
     const costPrice = Number(formData.get("cost_price"));
     const wholesalePrice = Number(formData.get("wholesale_price"));
     const retailPrice = Number(formData.get("price"));
+    const barcode = normalizeBarcode(formData.get("barcode"));
     if (!Number.isFinite(costPrice) || costPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(retailPrice) || retailPrice <= 0) {
       setNotice("Enter valid cost and wholesale prices, and a retail price above ₱0.");
+      return;
+    }
+    if (barcode === undefined) {
+      setNotice("Enter a barcode of up to 64 letters, digits, or symbols without spaces.");
       return;
     }
     setIsLoading(true);
@@ -740,18 +798,19 @@ export default function Home() {
         cost_price_known: true,
         wholesale_price: wholesalePrice,
         price: retailPrice,
+        barcode,
       }).eq("id", editingProductPrices.id);
       if (error) throw error;
       const productName = editingProductPrices.name;
       setEditingProductPrices(null);
-      setNotice(`${productName} prices updated.`);
+      setNotice(`${productName} details updated.`);
       try {
         await refreshWorkspace();
       } catch (error) {
         setNotice(`${productName} prices were updated, but the catalog could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
       }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Unable to update product prices.");
+      setNotice(productSaveError(error, "Unable to update product details."));
     } finally {
       setIsLoading(false);
     }
@@ -1045,7 +1104,7 @@ export default function Home() {
       await refreshWorkspace();
       setNotice(`${rows.length} product${rows.length === 1 ? "" : "s"} imported successfully.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Unable to import products.");
+      setNotice(productSaveError(error, "Unable to import products."));
     } finally {
       setIsImporting(false);
     }
@@ -1182,6 +1241,7 @@ export default function Home() {
               {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
               {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
               <SidebarLink icon={ClipboardList} label="Orders" active={currentView === "orders"} onClick={() => setActivePage("orders")} />
+              <SidebarLink icon={CalendarClock} label="Shifts" active={currentView === "shifts"} onClick={() => setActivePage("shifts")} />
               <SidebarLink icon={UserRound} label="Account" active={currentView === "account"} onClick={() => setActivePage("account")} />
             </nav>
           </div>
@@ -1242,6 +1302,7 @@ export default function Home() {
             {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
             {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
             <SidebarLink icon={ClipboardList} label="Orders" active={currentView === "orders"} onClick={() => setActivePage("orders")} />
+            <SidebarLink icon={CalendarClock} label="Shifts" active={currentView === "shifts"} onClick={() => setActivePage("shifts")} />
             <SidebarLink icon={UserRound} label="Account" active={currentView === "account"} onClick={() => setActivePage("account")} />
           </nav>
 
@@ -1345,6 +1406,8 @@ export default function Home() {
               />
             ) : currentView === "orders" ? (
               <OrdersView orders={orders} />
+            ) : currentView === "shifts" ? (
+              <ShiftHistoryView isAdmin={isAdmin} />
             ) : (
               <div className="grid items-start gap-6 2xl:grid-cols-[minmax(0,1fr)_350px]">
                 <section className="min-w-0">
@@ -1353,10 +1416,25 @@ export default function Home() {
                       <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">New sale</span></div>
                       <h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">New sale</h1>
                       <p className="mt-1 text-sm text-slate-500">Find a product and add it to the customer’s order.</p>
+                      <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-400"><ScanBarcode size={13} /> Barcode scanner ready — scan any item to add it.</p>
                     </div>
                     <div className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 sm:w-[230px]">
                       <Search size={16} className="shrink-0 text-slate-400" />
-                      <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search products..." aria-label="Search products" className="w-full bg-transparent text-sm outline-none placeholder:text-slate-400" />
+                      <input
+                        value={search}
+                        onChange={(event) => setSearch(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter" || !search.trim()) return;
+                          event.preventDefault();
+                          if (products.some((product) => product.barcode === search.trim())) {
+                            addScannedProduct(search.trim());
+                            setSearch("");
+                          }
+                        }}
+                        placeholder="Search or scan barcode..."
+                        aria-label="Search products or scan a barcode"
+                        className="w-full bg-transparent text-sm outline-none placeholder:text-slate-400"
+                      />
                       {search && <button type="button" aria-label="Clear search" onClick={() => setSearch("")}><X size={14} className="text-slate-400" /></button>}
                     </div>
                   </div>
@@ -1467,6 +1545,7 @@ export default function Home() {
                 <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" placeholder="25.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
                 <label className="block text-sm font-medium text-slate-700">Stock<input required name="stock" type="number" min="0" step="1" placeholder="12" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               </div>
+              <BarcodeField />
               <label className="block text-sm font-medium text-slate-700">Category<select name="category" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50">{categories.filter((item) => item !== "All items").map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
               <ProductImagePicker
                 selectedIcon={selectedProductIcon}
@@ -1483,13 +1562,14 @@ export default function Home() {
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) setEditingProductPrices(null); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="edit-product-prices-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <div className="mb-5 flex items-start justify-between">
-              <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="edit-product-prices-title" className="mt-1 text-xl font-semibold">Update product prices</h2><p className="mt-1 text-sm text-slate-500">{editingProductPrices.name}</p></div>
+              <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="edit-product-prices-title" className="mt-1 text-xl font-semibold">Update prices &amp; barcode</h2><p className="mt-1 text-sm text-slate-500">{editingProductPrices.name}</p></div>
               <button type="button" aria-label="Close price editor" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
             </div>
             <form onSubmit={saveProductPrices} className="space-y-4">
               <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.costPriceKnown ? editingProductPrices.costPrice : ""} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Wholesale price (₱)<input required name="wholesale_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.wholesalePrice} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" defaultValue={editingProductPrices.price} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <BarcodeField defaultValue={editingProductPrices.barcode ?? ""} />
               <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="h-11 flex-1 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel</button><button disabled={isLoading} type="submit" className="h-11 flex-1 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : "Save prices"}</button></div>
             </form>
           </div>
@@ -1620,8 +1700,8 @@ function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: Sal
   const [paymentFilter, setPaymentFilter] = useState<"all" | PaymentMethod>("all");
   const series = [
     { method: "cash" as const, name: "Cash", color: "#3b82f6", values: rows.map((row) => row.cash) },
-    { method: "e_wallet" as const, name: "E-Wallet", color: "#8b5cf6", values: rows.map((row) => row.eWallet) },
-    { method: "card" as const, name: "Card", color: "#f59e0b", values: rows.map((row) => row.card) },
+    { method: "e_wallet" as const, name: "E-Wallet", color: "#db2777", values: rows.map((row) => row.eWallet) },
+    { method: "card" as const, name: "Card", color: "#d97706", values: rows.map((row) => row.card) },
   ].filter((item) => paymentFilter === "all" || paymentFilter === item.method);
 
   return (
@@ -1638,20 +1718,16 @@ function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: Sal
       </div>
       <div className="px-4 py-4 sm:px-5">
         <div className="mb-3 flex items-center gap-4 text-[10px] text-slate-500">
-          {series.map((item) => <span key={item.method} className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ backgroundColor: item.color }} />{item.name}</span>)}
+          {series.map((item) => <span key={item.method} className="flex items-center gap-1.5"><span className="h-0.5 w-3 rounded-full" style={{ backgroundColor: item.color }} />{item.name}</span>)}
         </div>
         {rows.length ? (
-          <div className="rounded-xl bg-slate-50 px-3 py-3 dark:bg-slate-800 sm:px-5">
-            <div className="text-[10px] font-medium text-slate-400">Sales · PHP</div>
-            <div className="mt-1">
-              <SmoothLineChart
-                labels={rows.map((row) => row.label)}
-                series={series}
-                valueFormat={(value) => new Intl.NumberFormat("en-PH", { notation: "compact", maximumFractionDigits: 1 }).format(value)}
-              />
-            </div>
-          </div>
-        ) : <div className="grid h-36 place-items-center text-xs text-slate-400">No sales recorded for this period.</div>}
+          <SmoothLineChart
+            labels={rows.map((row) => row.label)}
+            series={series}
+            valueFormat={(value) => new Intl.NumberFormat("en-PH", { notation: "compact", maximumFractionDigits: 1 }).format(value)}
+            tooltipFormat={money}
+          />
+        ) :<div className="grid h-36 place-items-center text-xs text-slate-400">No sales recorded for this period.</div>}
       </div>
     </section>
   );
@@ -1681,6 +1757,14 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I add stock or update product photos?</summary>
             <p className="mt-2 text-xs leading-5 text-slate-500">Admins can open Inventory to restock an item or use its Image action to upload or change its custom photo. New products can also be given a custom image when added.</p>
+          </details>
+          <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">How do I use a barcode scanner?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Plug in any USB or Bluetooth scanner that works as a keyboard. On Point of sale, scan an item and it is added to the order. Admins assign barcodes from Inventory using Prices &amp; barcode, when adding a product, or with a barcode column in a CSV/JSON import.</p>
+          </details>
+          <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">What does the Shifts page show?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Each shift groups the orders an employee processed during the day shift (6 AM–6 PM) or night shift (6 PM–6 AM), with order counts and sales totals. Filter by day or night, sort by date or sales, and open a shift to see its orders.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">Where can I find completed sales?</summary>
@@ -1713,6 +1797,27 @@ function ProductArtwork({ product, className = "" }: { product: Product; classNa
         <span aria-hidden="true">{product.emoji}</span>
       )}
     </div>
+  );
+}
+
+function BarcodeField({ defaultValue = "" }: { defaultValue?: string }) {
+  return (
+    <label className="block text-sm font-medium text-slate-700">Barcode <span className="font-normal text-slate-400">(optional)</span>
+      <span className="mt-1.5 flex h-11 items-center gap-2 rounded-lg border border-slate-200 px-3 focus-within:border-blue-500 focus-within:ring-4 focus-within:ring-blue-50">
+        <ScanBarcode size={16} className="shrink-0 text-slate-400" />
+        <input
+          name="barcode"
+          defaultValue={defaultValue}
+          maxLength={64}
+          pattern="[!-~]{1,64}"
+          autoComplete="off"
+          placeholder="Scan or type the barcode"
+          // Scanners end with Enter; keep it from submitting the form.
+          onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }}
+          className="w-full bg-transparent text-sm outline-none"
+        />
+      </span>
+    </label>
   );
 }
 
@@ -1848,7 +1953,7 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
           <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><PackagePlus size={16} /> Add product</button>
         </div>
       </div>
-      <p className="mb-4 text-xs text-slate-400">Import CSV or JSON with <code className="rounded bg-slate-100 px-1 py-0.5">name, category, cost_price, wholesale_price, retail_price, stock</code> fields. Older imports with <code className="rounded bg-slate-100 px-1 py-0.5">price</code> remain supported.</p>
+      <p className="mb-4 text-xs text-slate-400">Import CSV or JSON with <code className="rounded bg-slate-100 px-1 py-0.5">name, category, cost_price, wholesale_price, retail_price, stock</code> fields, plus an optional <code className="rounded bg-slate-100 px-1 py-0.5">barcode</code>. Older imports with <code className="rounded bg-slate-100 px-1 py-0.5">price</code> remain supported.</p>
       <div className="mb-5 grid gap-3 sm:grid-cols-3">
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Total products</p><p className="mt-2 text-2xl font-semibold">{products.length}</p></div>
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Units in stock</p><p className="mt-2 text-2xl font-semibold">{products.reduce((sum, product) => sum + product.stock, 0)}</p></div>
@@ -1856,7 +1961,7 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span className="font-semibold text-slate-700">{product.name}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditPrices(product)} aria-label={`Edit prices for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><CircleDollarSign size={14} /> Prices</button><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[960px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center"><button type="button" onClick={() => onEditPrices(product)} aria-label={`Edit prices and barcode for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><CircleDollarSign size={14} /> Prices &amp; barcode</button><button type="button" onClick={() => onEditImage(product)} aria-label={`Edit image for ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-slate-500 hover:bg-blue-50 hover:text-blue-700"><FileUp size={14} /> Image</button><button type="button" onClick={() => onRestock(product)} aria-label={`Restock ${product.name}`} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 font-semibold text-blue-600 hover:bg-blue-50"><PackagePlus size={15} /> Restock</button><button type="button" aria-label={`Remove ${product.name}`} onClick={() => onRemove(product)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></td></tr>)}</tbody></table></div>
       </div>
     </section>
   );
