@@ -163,6 +163,17 @@ html.dark select {
     display: none !important;
   }
 
+  .analytics-report-print-mode > div > aside,
+  .analytics-report-print-mode > div > div > header,
+  .analytics-report-print-mode > div > nav[aria-label="Workspace navigation"],
+  .analytics-report-print-mode footer {
+    display: none !important;
+  }
+
+  .analytics-report-print-mode > div > div {
+    width: 100% !important;
+  }
+
   .analytics-print-card {
     break-inside: avoid;
     border-color: #cbd5e1 !important;

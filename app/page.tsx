@@ -38,6 +38,8 @@ import {
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { ThemeSwitcher } from "@/components/theme-switcher";
+import { AnalyticsReportsView } from "@/components/analytics-reports";
+import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { FormEvent, useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import Link from "next/link";
 import Image from "next/image";
@@ -60,6 +62,24 @@ type Product = {
 };
 type Order = { id: string; items: number; total: number; time: string; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string };
 type SalesChartPoint = { label: string; cash: number; eWallet: number; card: number };
+type ProfitReportPoint = {
+  label: string;
+  revenue: number;
+  costOfGoods: number;
+  netProfit: number;
+  orderCount: number;
+  ordersWithCost: number;
+  ordersWithoutCost: number;
+};
+type ProfitReportRow = {
+  bucket_label: string;
+  revenue_total: number | string;
+  cost_of_goods: number | string;
+  net_profit: number | string;
+  orders_count: number | string;
+  orders_with_cost: number | string;
+  orders_without_cost: number | string;
+};
 type ProductRow = { id: string; name: string; category: string; cost_price: number; cost_price_known: boolean; wholesale_price: number; price: number; stock: number; image_icon: string | null; image_url: string | null };
 type OrderRow = {
   id: string;
@@ -325,13 +345,18 @@ export default function Home() {
   const [dashboardStats, setDashboardStats] = useState<DashboardStats | null>(null);
   const [salesChart, setSalesChart] = useState<SalesChartPoint[]>([]);
   const [salesPeriod, setSalesPeriod] = useState<SalesPeriod>("today");
+  const [profitReport, setProfitReport] = useState<ProfitReportPoint[]>([]);
+  const [profitReportPeriod, setProfitReportPeriod] = useState<SalesPeriod>("today");
+  const [profitReportLoading, setProfitReportLoading] = useState(false);
+  const [profitReportError, setProfitReportError] = useState("");
+  const [profitReportUpdatedAt, setProfitReportUpdatedAt] = useState<Date | null>(null);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [readNotifications, setReadNotifications] = useState<string[]>([]);
   const [category, setCategory] = useState("All items");
   const [search, setSearch] = useState("");
-  const [activePage, setActivePage] = useState<"dashboard" | "pos" | "inventory" | "orders" | "employees" | "account">("pos");
+  const [activePage, setActivePage] = useState<"dashboard" | "analytics" | "pos" | "inventory" | "orders" | "employees" | "account">("pos");
   const [showAddProduct, setShowAddProduct] = useState(false);
   const [editingProductPrices, setEditingProductPrices] = useState<Product | null>(null);
   const [selectedProductIcon, setSelectedProductIcon] = useState("auto");
@@ -457,6 +482,41 @@ export default function Home() {
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [refreshDashboard, role, salesPeriod, signedIn]);
+
+  const refreshProfitReport = useCallback(async () => {
+    setProfitReportLoading(true);
+    setProfitReportError("");
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.rpc("get_admin_profit_report", { p_period: profitReportPeriod });
+      if (error) throw error;
+      const report = (data ?? []).map((row: ProfitReportRow): ProfitReportPoint => {
+        const point = {
+          label: String(row.bucket_label),
+          revenue: Number(row.revenue_total),
+          costOfGoods: Number(row.cost_of_goods),
+          netProfit: Number(row.net_profit),
+          orderCount: Number(row.orders_count),
+          ordersWithCost: Number(row.orders_with_cost),
+          ordersWithoutCost: Number(row.orders_without_cost),
+        };
+        if (Object.values(point).some((value) => typeof value === "number" && !Number.isFinite(value))) {
+          throw new Error("The analytics report returned an invalid numeric value.");
+        }
+        return point;
+      });
+      setProfitReport(report);
+      setProfitReportUpdatedAt(new Date());
+    } catch (error) {
+      setProfitReportError(error instanceof Error ? error.message : "Unable to load analytics report.");
+    } finally {
+      setProfitReportLoading(false);
+    }
+  }, [profitReportPeriod]);
+
+  useEffect(() => {
+    if (signedIn && role === "admin" && activePage === "analytics") void refreshProfitReport();
+  }, [activePage, refreshProfitReport, role, signedIn]);
 
   async function addToCart(product: Product) {
     if (product.stock < (cart[product.id] ?? 0) + 1) {
@@ -1109,7 +1169,7 @@ export default function Home() {
   const currentView = isAdmin ? activePage : activePage === "inventory" || activePage === "employees" ? "pos" : activePage;
 
   return (
-    <main className="min-h-screen bg-[#f5f8fd] text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+    <main className={`min-h-screen bg-[#f5f8fd] text-slate-900 dark:bg-slate-950 dark:text-slate-100 ${currentView === "analytics" ? "analytics-report-print-mode" : ""}`}>
       <div className="flex min-h-screen">
         <aside className="hidden w-[248px] shrink-0 flex-col border-r border-slate-100 bg-white px-5 py-6 dark:border-slate-800 dark:bg-slate-900 lg:flex">
           <Brand />
@@ -1117,7 +1177,7 @@ export default function Home() {
             <p className="mb-3 px-3 text-[10px] font-bold tracking-[0.16em] text-slate-400">WORKSPACE</p>
             <nav className="space-y-1">
               {isAdmin && <SidebarLink icon={LayoutDashboard} label="Dashboard" active={currentView === "dashboard"} onClick={() => setActivePage("dashboard")} />}
-              {isAdmin && <Link href="/analytics" className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-slate-50 hover:text-slate-800 dark:hover:bg-slate-800"><BarChart3 size={17} /> Analytics &amp; Reports</Link>}
+              {isAdmin && <SidebarLink icon={BarChart3} label="Analytics & Reports" active={currentView === "analytics"} onClick={() => setActivePage("analytics")} />}
               <SidebarLink icon={ShoppingCart} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
               {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
               {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
@@ -1177,6 +1237,7 @@ export default function Home() {
 
           <nav aria-label="Workspace navigation" className="flex gap-1 overflow-x-auto border-b border-slate-100 bg-white px-4 py-2 dark:border-slate-800 dark:bg-slate-900 lg:hidden">
             {isAdmin && <SidebarLink icon={LayoutDashboard} label="Dashboard" active={currentView === "dashboard"} onClick={() => setActivePage("dashboard")} />}
+            {isAdmin && <SidebarLink icon={BarChart3} label="Analytics" active={currentView === "analytics"} onClick={() => setActivePage("analytics")} />}
             <SidebarLink icon={ShoppingCart} label="Point of sale" active={currentView === "pos"} onClick={() => setActivePage("pos")} />
             {isAdmin && <SidebarLink icon={Boxes} label="Inventory" active={currentView === "inventory"} onClick={() => setActivePage("inventory")} />}
             {isAdmin && <SidebarLink icon={Users} label="Employees" active={currentView === "employees"} onClick={() => { setActivePage("employees"); void loadEmployees().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Unable to load employees.")); }} />}
@@ -1222,7 +1283,17 @@ export default function Home() {
               onNavigate={(page) => { setShowHelpCenter(false); setActivePage(page); }}
             />}
 
-            {currentView === "dashboard" && isAdmin && dashboardStats ? (
+            {currentView === "analytics" && isAdmin ? (
+              <AnalyticsReportsView
+                period={profitReportPeriod}
+                onPeriodChange={setProfitReportPeriod}
+                rows={profitReport}
+                isLoading={profitReportLoading}
+                error={profitReportError}
+                lastUpdated={profitReportUpdatedAt}
+                onRefresh={() => void refreshProfitReport()}
+              />
+            ) : currentView === "dashboard" && isAdmin && dashboardStats ? (
               <AdminOverview
                 stats={dashboardStats}
                 products={products}
@@ -1233,6 +1304,7 @@ export default function Home() {
                 isRefreshing={isRefreshing}
                 onPeriodChange={(period) => void refreshDashboard(period)}
                 onRefresh={() => void refreshDashboard()}
+                onViewAnalytics={() => setActivePage("analytics")}
                 onViewInventory={() => setActivePage("inventory")}
                 onViewOrders={() => setActivePage("orders")}
               />
@@ -1483,6 +1555,7 @@ function AdminOverview({
   isRefreshing,
   onPeriodChange,
   onRefresh,
+  onViewAnalytics,
   onViewInventory,
   onViewOrders,
 }: {
@@ -1495,6 +1568,7 @@ function AdminOverview({
   isRefreshing: boolean;
   onPeriodChange: (period: SalesPeriod) => void;
   onRefresh: () => void;
+  onViewAnalytics: () => void;
   onViewInventory: () => void;
   onViewOrders: () => void;
 }) {
@@ -1510,7 +1584,7 @@ function AdminOverview({
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Dashboard</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Store dashboard</h1><p className="mt-1 text-sm text-slate-500">Live sales, team, and inventory performance.</p></div>
         <div className="flex flex-wrap items-center gap-2">
-          <Link href="/analytics" className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><BarChart3 size={14} /> Analytics &amp; Reports</Link>
+          <button type="button" onClick={onViewAnalytics} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><BarChart3 size={14} /> Analytics &amp; Reports</button>
           <select aria-label="Sales report period" value={period} onChange={(event) => onPeriodChange(event.target.value as SalesPeriod)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold outline-none focus:border-blue-400">
             <option value="today">Today</option><option value="7days">Last 7 days</option><option value="30days">Last 30 days</option>
           </select>
@@ -1544,18 +1618,11 @@ function periodLabel(period: SalesPeriod) {
 
 function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: SalesPeriod }) {
   const [paymentFilter, setPaymentFilter] = useState<"all" | PaymentMethod>("all");
-  const visibleAmounts = rows.map((row) => ({
-    ...row,
-    cash: paymentFilter === "all" || paymentFilter === "cash" ? row.cash : 0,
-    eWallet: paymentFilter === "all" || paymentFilter === "e_wallet" ? row.eWallet : 0,
-    card: paymentFilter === "all" || paymentFilter === "card" ? row.card : 0,
-  }));
-  const maxTotal = Math.max(1, ...visibleAmounts.map((row) => row.cash + row.eWallet + row.card));
-  const showLabel = (index: number) => {
-    if (rows.length <= 7) return true;
-    const interval = rows.length <= 24 ? 4 : 5;
-    return index % interval === 0 || index === rows.length - 1;
-  };
+  const series = [
+    { method: "cash" as const, name: "Cash", color: "#3b82f6", values: rows.map((row) => row.cash) },
+    { method: "e_wallet" as const, name: "E-Wallet", color: "#8b5cf6", values: rows.map((row) => row.eWallet) },
+    { method: "card" as const, name: "Card", color: "#f59e0b", values: rows.map((row) => row.card) },
+  ].filter((item) => paymentFilter === "all" || paymentFilter === item.method);
 
   return (
     <section aria-label="Sales chart" className="mt-6 overflow-hidden rounded-2xl border border-slate-100 bg-white">
@@ -1571,31 +1638,17 @@ function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: Sal
       </div>
       <div className="px-4 py-4 sm:px-5">
         <div className="mb-3 flex items-center gap-4 text-[10px] text-slate-500">
-          {(paymentFilter === "all" || paymentFilter === "cash") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-blue-500" />Cash</span>}
-          {(paymentFilter === "all" || paymentFilter === "e_wallet") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-violet-500" />E-Wallet</span>}
-          {(paymentFilter === "all" || paymentFilter === "card") && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-sm bg-amber-500" />Card</span>}
+          {series.map((item) => <span key={item.method} className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full" style={{ backgroundColor: item.color }} />{item.name}</span>)}
         </div>
         {rows.length ? (
-          <div className="relative">
-            <div className="pointer-events-none absolute inset-x-0 top-0 flex h-36 flex-col justify-between" aria-hidden="true">
-              {[0, 1, 2, 3].map((line) => <div key={line} className="border-t border-dashed border-slate-100" />)}
-            </div>
-            <div className="relative flex h-36 items-end gap-1">
-              {visibleAmounts.map((row, index) => {
-                const cashHeight = row.cash / maxTotal * 100;
-                const eWalletHeight = row.eWallet / maxTotal * 100;
-                const cardHeight = row.card / maxTotal * 100;
-                return (
-                  <div key={`${row.label}-${index}`} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={`${row.label}: Cash ${money(row.cash)} · E-Wallet ${money(row.eWallet)} · Card ${money(row.card)}`}>
-                    <div className="flex h-full items-end justify-center gap-[2px]">
-                      {(paymentFilter === "all" || paymentFilter === "cash") && <div className="w-1/2 max-w-5 rounded-t bg-blue-500 transition-[height]" style={{ height: `${cashHeight}%` }} />}
-                      {(paymentFilter === "all" || paymentFilter === "e_wallet") && <div className="w-1/2 max-w-5 rounded-t bg-violet-500 transition-[height]" style={{ height: `${eWalletHeight}%` }} />}
-                      {(paymentFilter === "all" || paymentFilter === "card") && <div className="w-1/2 max-w-5 rounded-t bg-amber-500 transition-[height]" style={{ height: `${cardHeight}%` }} />}
-                    </div>
-                    <span className={`mt-2 h-3 truncate text-center text-[8px] text-slate-400 sm:text-[9px] ${showLabel(index) ? "" : "invisible"}`}>{row.label}</span>
-                  </div>
-                );
-              })}
+          <div className="rounded-xl bg-slate-50 px-3 py-3 dark:bg-slate-800 sm:px-5">
+            <div className="text-[10px] font-medium text-slate-400">Sales · PHP</div>
+            <div className="mt-1">
+              <SmoothLineChart
+                labels={rows.map((row) => row.label)}
+                series={series}
+                valueFormat={(value) => new Intl.NumberFormat("en-PH", { notation: "compact", maximumFractionDigits: 1 }).format(value)}
+              />
             </div>
           </div>
         ) : <div className="grid h-36 place-items-center text-xs text-slate-400">No sales recorded for this period.</div>}

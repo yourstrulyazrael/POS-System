@@ -1,22 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { ArrowLeft, BarChart3, FileSpreadsheet, Printer, RefreshCw } from "lucide-react";
-import { ThemeSwitcher } from "@/components/theme-switcher";
-import { createClient } from "@/lib/supabase/client";
+import { useMemo, useState } from "react";
+import { FileSpreadsheet, Printer, RefreshCw } from "lucide-react";
+import { SmoothLineChart } from "@/components/smooth-line-chart";
 
 type ReportPeriod = "today" | "7days" | "30days";
-type ReportRow = {
-  bucket_label: string;
-  revenue_total: number | string;
-  cost_of_goods: number | string;
-  net_profit: number | string;
-  orders_count: number | string;
-  orders_with_cost: number | string;
-  orders_without_cost: number | string;
-};
 type ReportBucket = {
   label: string;
   revenue: number;
@@ -36,73 +24,24 @@ const periodLabels: Record<ReportPeriod, string> = {
 const money = (amount: number) =>
   new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(amount);
 
-export default function AnalyticsPage() {
-  const router = useRouter();
-  const [period, setPeriod] = useState<ReportPeriod>("today");
-  const [rows, setRows] = useState<ReportBucket[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [authorized, setAuthorized] = useState(false);
-  const [error, setError] = useState("");
-  const [refreshKey, setRefreshKey] = useState(0);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    async function loadReport() {
-      setIsLoading(true);
-      setError("");
-      try {
-        const supabase = createClient();
-        const { data: authData, error: authError } = await supabase.auth.getUser();
-        if (authError) throw authError;
-        if (!authData.user) {
-          router.replace("/");
-          return;
-        }
-        const { data: profile, error: profileError } = await supabase
-          .from("profiles")
-          .select("role")
-          .eq("id", authData.user.id)
-          .single();
-        if (profileError) throw profileError;
-        if (profile.role !== "admin") {
-          router.replace("/");
-          return;
-        }
-        if (!active) return;
-        setAuthorized(true);
-
-        const { data, error: reportError } = await supabase.rpc("get_admin_profit_report", { p_period: period });
-        if (reportError) throw reportError;
-        const reportRows = (data ?? []).map((row: ReportRow): ReportBucket => {
-          const bucket = {
-            label: String(row.bucket_label),
-            revenue: Number(row.revenue_total),
-            costOfGoods: Number(row.cost_of_goods),
-            netProfit: Number(row.net_profit),
-            orderCount: Number(row.orders_count),
-            ordersWithCost: Number(row.orders_with_cost),
-            ordersWithoutCost: Number(row.orders_without_cost),
-          };
-          if (Object.values(bucket).some((value) => typeof value === "number" && !Number.isFinite(value))) {
-            throw new Error("The analytics report returned an invalid numeric value.");
-          }
-          return bucket;
-        });
-        if (!active) return;
-        setRows(reportRows);
-        setLastUpdated(new Date());
-      } catch (caughtError) {
-        if (active) setError(caughtError instanceof Error ? caughtError.message : "Unable to load analytics report.");
-      } finally {
-        if (active) setIsLoading(false);
-      }
-    }
-    void loadReport();
-    return () => {
-      active = false;
-    };
-  }, [period, refreshKey, router]);
+export function AnalyticsReportsView({
+  period,
+  onPeriodChange,
+  rows,
+  isLoading,
+  error,
+  lastUpdated,
+  onRefresh,
+}: {
+  period: ReportPeriod;
+  onPeriodChange: (period: ReportPeriod) => void;
+  rows: ReportBucket[];
+  isLoading: boolean;
+  error: string;
+  lastUpdated: Date | null;
+  onRefresh: () => void;
+}) {
+  const [exportError, setExportError] = useState("");
 
   const totals = useMemo(
     () => rows.reduce(
@@ -118,10 +57,8 @@ export default function AnalyticsPage() {
     ),
     [rows],
   );
-  const maxRevenue = Math.max(1, ...rows.map((row) => row.revenue));
-
   function exportExcel() {
-    setError("");
+    setExportError("");
     try {
       const summaryRows: (string | number)[][] = [
         ["Analytics & Reports", periodLabels[period]],
@@ -174,41 +111,30 @@ ${worksheet("Breakdown", breakdownRows)}
       link.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (caughtError) {
-      setError(caughtError instanceof Error ? `Unable to export Excel report: ${caughtError.message}` : "Unable to export Excel report.");
+      setExportError(caughtError instanceof Error ? `Unable to export Excel report: ${caughtError.message}` : "Unable to export Excel report.");
     }
   }
 
   function exportPdf() {
-    setError("");
     window.print();
   }
 
-  if (!authorized) {
-    return (
-      <main className="grid min-h-screen place-items-center bg-[#f5f8fd] px-4 text-sm text-slate-500 dark:bg-slate-950">
-        {error ? <p role="alert" className="max-w-lg text-center text-red-600">{error}</p> : <span className="animate-pulse">Checking admin access…</span>}
-      </main>
-    );
-  }
-
   return (
-    <main className="analytics-report-page min-h-screen bg-[#f5f8fd] text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-      <div className="mx-auto min-h-screen max-w-7xl px-4 py-6 sm:px-7 lg:px-10">
-        <header className="analytics-no-print mb-8 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <Link href="/" aria-label="Back to store dashboard" className="grid h-10 w-10 place-items-center rounded-xl border border-slate-200 bg-white text-slate-500 hover:border-blue-200 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-900"><ArrowLeft size={18} /></Link>
-            <div className="grid h-10 w-10 place-items-center rounded-xl bg-blue-50 text-blue-700 dark:bg-blue-950 dark:text-blue-300"><BarChart3 size={20} /></div>
-            <div><p className="text-xs font-semibold text-blue-600">CLOVER &amp; CO.</p><h1 className="text-lg font-semibold">Analytics &amp; Reports</h1></div>
+    <section>
+        <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><span>Reports</span><span>/</span><span className="text-blue-600">Analytics</span></div>
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Analytics &amp; Reports</h1>
+            <p className="mt-1 text-sm text-slate-500">Revenue and estimated profit · PHP · Asia/Manila</p>
           </div>
-          <div className="flex items-center gap-2">
-            <ThemeSwitcher />
-            <button type="button" onClick={() => setRefreshKey((current) => current + 1)} disabled={isLoading} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900"><RefreshCw size={14} className={isLoading ? "animate-spin" : ""} /> Refresh</button>
+          <div className="analytics-no-print flex flex-wrap items-center gap-2">
+            <button type="button" onClick={onRefresh} disabled={isLoading} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900"><RefreshCw size={14} className={isLoading ? "animate-spin" : ""} /> Refresh</button>
             <button type="button" onClick={exportPdf} disabled={isLoading || rows.length === 0} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900"><Printer size={14} /> Export PDF</button>
             <button type="button" onClick={exportExcel} disabled={isLoading || rows.length === 0} className="flex h-10 items-center gap-2 rounded-xl bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"><FileSpreadsheet size={14} /> Export Excel</button>
           </div>
         </header>
 
-        <section className="analytics-print-card rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-7">
+        <div className="analytics-print-card rounded-2xl border border-slate-100 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-7">
           <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
             <div>
               <p className="mb-1 text-xs font-medium text-slate-400">Reports <span className="px-1">/</span> <span className="text-blue-600">{periodLabels[period]}</span></p>
@@ -217,13 +143,13 @@ ${worksheet("Breakdown", breakdownRows)}
             </div>
             <div className="analytics-no-print flex items-center gap-2">
               <label htmlFor="report-period" className="text-xs font-medium text-slate-500">Date range</label>
-              <select id="report-period" value={period} onChange={(event) => setPeriod(event.target.value as ReportPeriod)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-900">
+              <select id="report-period" value={period} onChange={(event) => onPeriodChange(event.target.value as ReportPeriod)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-900">
                 <option value="today">Today</option><option value="7days">Last 7 days</option><option value="30days">Last 30 days</option>
               </select>
             </div>
           </div>
 
-          {error && <div role="alert" className="mb-5 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+          {(error || exportError) && <div role="alert" className="mb-5 rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error || exportError}</div>}
           {totals.ordersWithoutCost > 0 && (
             <div className="mb-5 rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-900">
               Estimated net profit uses only orders with recorded product costs. {totals.ordersWithoutCost} order{totals.ordersWithoutCost === 1 ? " is" : "s are"} missing cost snapshots and excluded from the profit calculation. This estimate also excludes operating expenses.
@@ -244,19 +170,18 @@ ${worksheet("Breakdown", breakdownRows)}
             {isLoading ? (
               <div className="grid h-52 place-items-center rounded-xl bg-slate-50 text-sm text-slate-400 dark:bg-slate-800">Loading report…</div>
             ) : (
-              <div className="flex h-52 items-end gap-1 overflow-x-auto rounded-xl bg-slate-50 px-3 pt-4 dark:bg-slate-800 sm:gap-2 sm:px-5">
-                {rows.map((row) => (
-                  <div key={row.label} title={`${row.label} · Revenue ${money(row.revenue)} · Estimated profit ${money(row.netProfit)}`} className="flex h-full min-w-6 flex-1 flex-col justify-end">
-                    <div className="flex h-full items-end justify-center gap-1">
-                      <div className="w-2/3 max-w-8 rounded-t-md bg-blue-500" style={{ height: `${Math.max(row.revenue > 0 ? 2 : 0, row.revenue / maxRevenue * 100)}%` }} />
-                      <div className={`w-1/3 max-w-4 rounded-t-md ${row.netProfit < 0 ? "bg-red-500" : "bg-emerald-500"}`} style={{ height: `${Math.max(row.netProfit !== 0 ? 2 : 0, Math.abs(row.netProfit) / maxRevenue * 100)}%` }} />
-                    </div>
-                    <span className="mt-2 h-4 truncate text-center text-[9px] text-slate-400">{row.label}</span>
-                  </div>
-                ))}
+              <div className="rounded-xl bg-slate-50 px-3 py-4 dark:bg-slate-800 sm:px-5">
+                <SmoothLineChart
+                  labels={rows.map((row) => row.label)}
+                  series={[
+                    { name: "Revenue", color: "#3b82f6", values: rows.map((row) => row.revenue) },
+                    { name: "Estimated net profit", color: "#10b981", values: rows.map((row) => row.netProfit) },
+                  ]}
+                  valueFormat={money}
+                />
               </div>
             )}
-            <div className="mt-2 flex gap-4 text-[10px] text-slate-500"><span><i className="mr-1 inline-block h-2 w-2 rounded-sm bg-blue-500" />Revenue</span><span><i className="mr-1 inline-block h-2 w-2 rounded-sm bg-emerald-500" />Estimated net profit</span></div>
+            <div className="mt-2 flex gap-4 text-[10px] text-slate-500"><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-blue-500" />Revenue</span><span><i className="mr-1 inline-block h-2 w-2 rounded-full bg-emerald-500" />Estimated net profit</span></div>
           </div>
 
           <div className="mt-7 overflow-hidden rounded-xl border border-slate-100 dark:border-slate-800">
@@ -273,9 +198,8 @@ ${worksheet("Breakdown", breakdownRows)}
             </div>
           </div>
           <p className="mt-4 text-[11px] leading-5 text-slate-400">Estimated net profit = revenue less recorded cost of goods sold. It is not accounting net income and excludes rent, payroll, taxes, and other operating expenses. Orders without cost snapshots are excluded from cost and profit totals.</p>
-        </section>
-      </div>
-    </main>
+        </div>
+    </section>
   );
 }
 
