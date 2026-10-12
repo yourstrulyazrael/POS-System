@@ -402,6 +402,7 @@ export default function Home() {
   const [removeExistingProductImage, setRemoveExistingProductImage] = useState(false);
   const [showHelpCenter, setShowHelpCenter] = useState(false);
   const [showCheckoutDialog, setShowCheckoutDialog] = useState(false);
+  const [showMobileCart, setShowMobileCart] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cash");
   const [wholesaleMode, setWholesaleMode] = useState(false);
   const [cashReceived, setCashReceived] = useState("");
@@ -646,6 +647,7 @@ export default function Home() {
     else if (editingProductImage) { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }
     else if (showAddEmployee) setShowAddEmployee(false);
     else if (restockProduct) setRestockProduct(null);
+    else if (showMobileCart) setShowMobileCart(false);
     else if (showNotifications) setShowNotifications(false);
     else return false;
     return true;
@@ -1562,7 +1564,7 @@ export default function Home() {
             ) : currentView === "shifts" ? (
               <ShiftHistoryView isAdmin={isAdmin} />
             ) : (
-              <div className="grid items-start gap-6 2xl:grid-cols-[minmax(0,1fr)_350px]">
+              <div className="grid items-start gap-5 pb-20 md:grid-cols-[minmax(0,1fr)_300px] md:pb-0 xl:grid-cols-[minmax(0,1fr)_340px] xl:gap-6">
                 <section className="min-w-0">
                   <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
                     <div>
@@ -1606,7 +1608,7 @@ export default function Home() {
                   </div>
 
                   {visibleProducts.length > 0 ? (
-                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-3" onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4" onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
                       {visibleProducts.map((product) => {
                         const unavailable = product.stock <= (cart[product.id] ?? 0);
                         return (
@@ -1631,20 +1633,37 @@ export default function Home() {
                   )}
                 </section>
 
-                <CartPanel
-                  items={cartItems}
-                  quantities={cart}
-                  count={itemCount}
-                  subtotal={subtotal}
-                  total={total}
-                  onChange={changeQuantity}
-                  onCheckout={() => { setNotice(""); setShowCheckoutDialog(true); }}
-                  isProcessing={isLoading}
-                  onClear={() => { setCart({}); setWholesaleMode(false); }}
-                  priceOf={unitPrice}
-                  wholesale={wholesaleMode}
-                  savings={wholesaleSavings}
-                />
+                {/* Phones: the cart is a drawer that slides in from the right.
+                    Tablets and up: a sticky column that fills the viewport
+                    height, so Pay stays visible however long the list is. */}
+                {showMobileCart && <div aria-hidden="true" onClick={() => setShowMobileCart(false)} className="fixed inset-0 z-40 bg-slate-950/40 md:hidden" />}
+                <div
+                  id="cart-panel"
+                  className={`fixed inset-y-0 right-0 z-50 w-[min(380px,88vw)] transition-[transform,visibility] duration-200 md:visible md:sticky md:bottom-auto md:right-auto md:top-[88px] md:z-auto md:h-[calc(100dvh-104px)] md:w-auto md:translate-x-0 md:transition-none ${showMobileCart ? "visible translate-x-0" : "invisible translate-x-full"}`}
+                >
+                  <CartPanel
+                    items={cartItems}
+                    quantities={cart}
+                    count={itemCount}
+                    subtotal={subtotal}
+                    total={total}
+                    onChange={changeQuantity}
+                    onCheckout={() => { setNotice(""); setShowMobileCart(false); setShowCheckoutDialog(true); }}
+                    isProcessing={isLoading}
+                    onClear={() => { setCart({}); setWholesaleMode(false); }}
+                    priceOf={unitPrice}
+                    wholesale={wholesaleMode}
+                    savings={wholesaleSavings}
+                    onClose={() => setShowMobileCart(false)}
+                  />
+                </div>
+                <div className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-100 bg-white/95 px-4 py-3 shadow-[0_-4px_16px_rgba(20,45,90,0.06)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/95 md:hidden">
+                  <button type="button" aria-controls="cart-panel" aria-expanded={showMobileCart} onClick={() => setShowMobileCart(true)} className="flex h-12 w-full items-center gap-3 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-lg shadow-blue-600/20">
+                    <span className="relative"><ShoppingCart size={19} />{itemCount > 0 && <span className="absolute -right-2 -top-2 grid min-h-4 min-w-4 place-items-center rounded-full bg-white px-1 text-[9px] font-bold text-blue-700">{itemCount > 99 ? "99+" : itemCount}</span>}</span>
+                    <span className="flex-1 text-left">{itemCount ? "View order" : "Order is empty"}{wholesaleMode && <span className="ml-2 rounded-full bg-white/20 px-2 py-0.5 text-[10px]">Wholesale</span>}</span>
+                    <span>{money(total)}</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -2141,7 +2160,7 @@ function ProductImagePicker({
   );
 }
 
-function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing, priceOf, wholesale, savings }: {
+function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing, priceOf, wholesale, savings, onClose }: {
   items: Product[];
   quantities: Record<string, number>;
   count: number;
@@ -2154,22 +2173,24 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
   priceOf: (product: Product) => number;
   wholesale: boolean;
   savings: number;
+  onClose: () => void;
 }) {
   return (
-    <aside className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-[0_3px_16px_rgba(20,45,90,0.035)] 2xl:sticky 2xl:top-[96px]">
-      <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+    <aside aria-label="Current order" className="flex h-full flex-col overflow-hidden border-l border-slate-100 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 md:rounded-2xl md:border md:shadow-[0_3px_16px_rgba(20,45,90,0.035)]">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
         <div><div className="flex items-center gap-2"><ShoppingCart size={17} className="text-blue-600" /><h2 className="text-sm font-semibold">Current order</h2></div><p className="mt-1 flex items-center gap-1.5 pl-[25px] text-[11px] text-slate-400">New sale{wholesale && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Wholesale</span>}</p></div>
-        {count > 0 && <button type="button" onClick={onClear} aria-keyshortcuts="F9" className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-red-500">Clear all <Kbd>F9</Kbd></button>}
+        {count > 0 && <button type="button" onClick={onClear} aria-keyshortcuts="F9" className="ml-auto flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-red-500">Clear all <Kbd>F9</Kbd></button>}
+        <button type="button" aria-label="Close order panel" onClick={onClose} className="-mr-2 rounded-lg p-2 text-slate-400 hover:bg-slate-50 md:hidden"><X size={18} /></button>
       </div>
-      <div className="flex items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px]"><span className="text-slate-500">Customer</span><button type="button" className="flex items-center gap-1 font-semibold text-blue-700">Walk-in customer <ChevronDown size={13} /></button></div>
-      <div className="max-h-[330px] min-h-[180px] overflow-y-auto px-5">
+      <div className="flex shrink-0 items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px] dark:bg-slate-800/60"><span className="text-slate-500">Customer</span><button type="button" className="flex items-center gap-1 font-semibold text-blue-700">Walk-in customer <ChevronDown size={13} /></button></div>
+      <div className="min-h-[120px] flex-1 overflow-y-auto px-5">
         {items.length > 0 ? <ul className="divide-y divide-slate-100">{items.map((product) => <li key={product.id} className="flex items-center gap-3 py-4">
           <ProductArtwork product={product} className="h-11 w-11 rounded-xl text-xl" />
           <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-1 text-[11px] text-slate-400">{money(priceOf(product))} each{priceOf(product) !== product.price && <span className="ml-1.5 line-through">{money(product.price)}</span>}</p><div className="mt-2 flex items-center gap-2"><button type="button" aria-label={`Remove one ${product.name}`} onClick={() => onChange(product.id, -1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Minus size={12} /></button><span className="w-4 text-center text-xs font-semibold">{quantities[product.id]}</span><button type="button" aria-label={`Add one ${product.name}`} onClick={() => onChange(product.id, 1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Plus size={12} /></button></div></div>
           <div className="flex h-full flex-col items-end justify-between gap-4"><button type="button" aria-label={`Remove ${product.name} from order`} onClick={() => onChange(product.id, -quantities[product.id])} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button><span className="text-xs font-semibold">{money(priceOf(product) * quantities[product.id])}</span></div>
         </li>)}</ul> : <div className="flex min-h-[180px] flex-col items-center justify-center text-center"><div className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-500"><ShoppingCart size={20} /></div><p className="mt-3 text-xs font-semibold text-slate-700">Your order is empty</p><p className="mt-1 text-[11px] text-slate-400">Add a product to get started.</p></div>}
       </div>
-      <div className="border-t border-slate-100 px-5 py-4">
+      <div className="shrink-0 border-t border-slate-100 px-5 py-4 dark:border-slate-800">
         <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(wholesale ? subtotal + savings : subtotal)}</span></div>{wholesale && savings > 0 && <div className="flex justify-between text-emerald-700"><span>Wholesale savings</span><span className="font-medium">−{money(savings)}</span></div>}<div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
         <button type="button" disabled={!count || isProcessing} onClick={onCheckout} aria-keyshortcuts="F4" className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : `Continue to payment · ${money(total)}`}{!isProcessing && <Kbd>F4</Kbd>}</button>
         <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-slate-400"><WalletCards size={13} /> Secure, fast checkout</p>
