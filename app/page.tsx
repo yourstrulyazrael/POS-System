@@ -17,6 +17,8 @@ import {
   Banknote,
   CircleHelp,
   LayoutDashboard,
+  Download,
+  FileSpreadsheet,
   FileUp,
   ImageIcon,
   ImageOff,
@@ -49,6 +51,7 @@ import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
+import { buildTemplateXlsx, importColumns, readProductFile, type RawProductRecord } from "@/lib/product-import";
 import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
 import Image from "next/image";
@@ -249,58 +252,6 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
   };
 }
 
-function parseProductJson(content: string) {
-  let value: unknown;
-  try {
-    value = JSON.parse(content);
-  } catch {
-    throw new Error("The selected JSON file is not valid JSON.");
-  }
-  if (!Array.isArray(value)) throw new Error("Product JSON must be an array of product records.");
-  return validateImportedProducts(value);
-}
-
-function parseProductCsv(content: string) {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let quoted = false;
-  for (let index = 0; index < content.length; index += 1) {
-    const character = content[index];
-    if (character === '"' && quoted && content[index + 1] === '"') {
-      cell += '"';
-      index += 1;
-    } else if (character === '"') {
-      quoted = !quoted;
-    } else if (character === "," && !quoted) {
-      row.push(cell);
-      cell = "";
-    } else if ((character === "\n" || character === "\r") && !quoted) {
-      if (character === "\r" && content[index + 1] === "\n") index += 1;
-      row.push(cell);
-      if (row.some((value) => value.trim())) rows.push(row);
-      row = [];
-      cell = "";
-    } else {
-      cell += character;
-    }
-  }
-  if (quoted) throw new Error("The CSV file has an unclosed quoted field.");
-  row.push(cell);
-  if (row.some((value) => value.trim())) rows.push(row);
-  if (rows.length < 2) throw new Error("The CSV needs a header and at least one product row.");
-
-  const headers = rows[0].map((header) => header.replace(/^\uFEFF/, "").trim().toLowerCase());
-  const requiredHeaders = ["name", "category", "stock"];
-  if (requiredHeaders.some((header) => !headers.includes(header)) || (!headers.includes("price") && !headers.includes("retail_price"))) {
-    throw new Error("CSV headers must include name, category, retail_price (or price), and stock.");
-  }
-  const records = rows.slice(1).map((values) =>
-    Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])),
-  );
-  return validateImportedProducts(records);
-}
-
 // A POS entry is "<quantity>/<barcode or name>" or just "<barcode or name>",
 // e.g. "24/4800016644290" adds 24 of that item.
 function parseSaleEntry(value: string) {
@@ -333,52 +284,85 @@ function productSaveError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : error && typeof error === "object" && "message" in error ? String(error.message) : fallback;
 }
 
-function validateImportedProducts(value: unknown[]) {
-  return value.map((record, index) => {
-    if (!record || typeof record !== "object" || Array.isArray(record)) {
-      throw new Error(`Product row ${index + 1} must be an object.`);
+type ImportedProduct = {
+  name: string;
+  category: string;
+  cost_price?: number;
+  cost_price_known?: boolean;
+  wholesale_price?: number;
+  price: number;
+  stock: number;
+  image_icon: string;
+  barcode?: string;
+};
+
+// Checks every imported row and collects all problems (with the file's row
+// number) instead of stopping at the first. Blank optional prices are left
+// out so an import doesn't overwrite values already set on a product.
+type ImportPreview = {
+  fileName: string;
+  products: (ImportedProduct & { sourceRow: number; isUpdate: boolean })[];
+  errors: string[];
+  newCategories: string[];
+};
+
+function validateImportedProducts(records: RawProductRecord[]) {
+  const products: (ImportedProduct & { sourceRow: number })[] = [];
+  const errors: string[] = [];
+  const seenNames = new Map<string, number>();
+  const seenBarcodes = new Map<string, number>();
+  for (const record of records) {
+    const row = `Row ${record.sourceRow}`;
+    const problems: string[] = [];
+    const name = (record.name ?? "").trim();
+    const category = (record.category ?? "").trim();
+    const price = Number(record.retail_price);
+    const stock = Number(record.stock);
+    const costText = record.cost_price ?? "";
+    const wholesaleText = record.wholesale_price ?? "";
+    const costPrice = Number(costText);
+    const wholesalePrice = Number(wholesaleText);
+    const imageIcon = (record.image_icon ?? "").trim() || "auto";
+    const barcode = normalizeBarcode(record.barcode);
+
+    if (!name || name.length > 120) problems.push("a product name (up to 120 characters)");
+    if (!category || category.length > 80) problems.push("a category (up to 80 characters)");
+    if (!record.retail_price || !Number.isFinite(price) || price <= 0) problems.push("a retail price above ₱0");
+    if (record.stock === undefined || record.stock === "" || !Number.isInteger(stock) || stock < 0) problems.push("a whole-number stock of 0 or more");
+    if (costText && (!Number.isFinite(costPrice) || costPrice < 0)) problems.push("a cost price of ₱0 or more (or blank)");
+    if (wholesaleText && (!Number.isFinite(wholesalePrice) || wholesalePrice < 0)) problems.push("a wholesale price of ₱0 or more (or blank)");
+    if (barcode === undefined) problems.push("a barcode without spaces (up to 64 characters), or blank");
+    if (!productIcons.some((icon) => icon.id === imageIcon)) problems.push("a valid image icon, or blank");
+    if (problems.length) {
+      errors.push(`${row} needs ${problems.join(", ")}.`);
+      continue;
     }
-    const item = record as Record<string, unknown>;
-    const name = typeof item.name === "string" ? item.name.trim() : "";
-    const category = typeof item.category === "string" ? item.category.trim() : "";
-    const costPriceProvided = item.cost_price !== undefined && item.cost_price !== null && item.cost_price !== "";
-    const costPrice = costPriceProvided ? Number(item.cost_price) : 0;
-    const wholesalePrice = item.wholesale_price === undefined || item.wholesale_price === "" ? 0 : Number(item.wholesale_price);
-    const price = Number(item.retail_price ?? item.price);
-    const stock = Number(item.stock);
-    const imageIcon = typeof item.image_icon === "string" ? item.image_icon.trim() : "auto";
-    const barcode = normalizeBarcode(item.barcode);
-    if (barcode === undefined) {
-      throw new Error(`Product row ${index + 1} has an invalid barcode. Use up to 64 letters, digits, or symbols without spaces.`);
+    const nameKey = name.toLowerCase();
+    if (seenNames.has(nameKey)) {
+      errors.push(`${row} repeats “${name}” from row ${seenNames.get(nameKey)}. Each product name can appear once.`);
+      continue;
     }
-    if (
-      !name ||
-      name.length > 120 ||
-      !category ||
-      category.length > 80 ||
-      !Number.isFinite(costPrice) ||
-      costPrice < 0 ||
-      !Number.isFinite(wholesalePrice) ||
-      wholesalePrice < 0 ||
-      !Number.isFinite(price) ||
-      price <= 0 ||
-      !Number.isInteger(stock) ||
-      stock < 0 ||
-      !productIcons.some((icon) => icon.id === imageIcon)
-    ) {
-      throw new Error(`Product row ${index + 1} needs a name, category, non-negative cost and wholesale prices, a positive retail price, and non-negative whole-number stock.`);
+    seenNames.set(nameKey, record.sourceRow);
+    if (barcode) {
+      if (seenBarcodes.has(barcode)) {
+        errors.push(`${row} repeats barcode ${barcode} from row ${seenBarcodes.get(barcode)}.`);
+        continue;
+      }
+      seenBarcodes.set(barcode, record.sourceRow);
     }
-    return {
+    products.push({
+      sourceRow: record.sourceRow,
       name,
       category,
-      ...(costPriceProvided ? { cost_price: costPrice, cost_price_known: true } : {}),
-      ...(item.wholesale_price !== undefined && item.wholesale_price !== null && item.wholesale_price !== "" ? { wholesale_price: wholesalePrice } : {}),
+      ...(costText ? { cost_price: costPrice, cost_price_known: true } : {}),
+      ...(wholesaleText ? { wholesale_price: wholesalePrice } : {}),
       price,
       stock,
       image_icon: imageIcon,
       ...(barcode ? { barcode } : {}),
-    };
-  });
+    });
+  }
+  return { products, errors };
 }
 
 export default function Home() {
@@ -429,6 +413,7 @@ export default function Home() {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [showAddEmployee, setShowAddEmployee] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [restockProduct, setRestockProduct] = useState<Product | null>(null);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -713,6 +698,7 @@ export default function Home() {
     else if (showAddEmployee) setShowAddEmployee(false);
     else if (restockProduct) setRestockProduct(null);
     else if (quickAdd) setQuickAdd(null);
+    else if (showImport) { if (!isImporting) setShowImport(false); }
     else if (showMobileCart) setShowMobileCart(false);
     else if (showNotifications) setShowNotifications(false);
     else return false;
@@ -723,7 +709,7 @@ export default function Home() {
     if (!signedIn || event.defaultPrevented || event.isComposing) return;
     const target = event.target as HTMLElement | null;
     const inTextField = !!target?.closest("input, textarea, select, [contenteditable='true']");
-    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd;
+    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport;
     const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
 
     if (event.key === "Escape") {
@@ -1351,27 +1337,59 @@ export default function Home() {
     }
   }
 
-  async function importProducts(file: File) {
+  // Step 1 of an import: read and check the file for the preview. Category
+  // spellings are matched to existing ones (and to earlier rows in the file).
+  async function prepareImport(file: File): Promise<ImportPreview> {
+    const { products: rows, errors } = validateImportedProducts(await readProductFile(file));
+    const knownCategories = [...productCategories];
+    const newCategories: string[] = [];
+    const existingNames = new Set(products.map((product) => product.name));
+    const prepared = rows.map((row) => {
+      const productCategory = normalizeCategory(row.category, knownCategories);
+      if (!knownCategories.includes(productCategory)) {
+        knownCategories.push(productCategory);
+        newCategories.push(productCategory);
+      }
+      return { ...row, category: productCategory, isUpdate: existingNames.has(row.name) };
+    });
+    return { fileName: file.name, products: prepared, errors, newCategories };
+  }
+
+  // Step 2: save. Rows are upserted by product name. Rows are grouped by which
+  // optional columns they include: a bulk upsert fills columns missing from a
+  // row with NULL, which would fail or overwrite a value already set.
+  async function importProducts(preview: ImportPreview) {
     setIsImporting(true);
     try {
-      const text = await file.text();
-      const rows = file.name.toLowerCase().endsWith(".json")
-        ? parseProductJson(text)
-        : parseProductCsv(text);
-      if (rows.length === 0) throw new Error("The selected file does not contain any products.");
-      // Each new category in the file is created as-is; later rows that differ
-      // only in case or spacing reuse it (and existing categories' spelling).
-      const knownCategories = [...productCategories];
-      const normalizedRows = rows.map((product) => {
-        const productCategory = normalizeCategory(product.category, knownCategories);
-        if (!knownCategories.includes(productCategory)) knownCategories.push(productCategory);
-        return { ...product, category: productCategory, active: true };
-      });
+      const groups = new Map<string, ImportedProduct[]>();
+      for (const product of preview.products) {
+        const row: ImportedProduct & { active: boolean } = {
+          name: product.name,
+          category: product.category,
+          price: product.price,
+          stock: product.stock,
+          image_icon: product.image_icon,
+          active: true,
+          ...(product.cost_price !== undefined ? { cost_price: product.cost_price, cost_price_known: true } : {}),
+          ...(product.wholesale_price !== undefined ? { wholesale_price: product.wholesale_price } : {}),
+          ...(product.barcode ? { barcode: product.barcode } : {}),
+        };
+        const signature = Object.keys(row).sort().join(",");
+        groups.set(signature, [...(groups.get(signature) ?? []), row]);
+      }
       const supabase = createClient();
-      const { error } = await supabase.from("products").upsert(normalizedRows, { onConflict: "name" });
-      if (error) throw error;
-      await refreshWorkspace();
-      setNotice(`${rows.length} product${rows.length === 1 ? "" : "s"} imported successfully.`);
+      for (const rows of groups.values()) {
+        const { error } = await supabase.from("products").upsert(rows, { onConflict: "name" });
+        if (error) throw error;
+      }
+      const count = preview.products.length;
+      setShowImport(false);
+      setNotice(`${count} product${count === 1 ? "" : "s"} imported successfully.`);
+      try {
+        await refreshWorkspace();
+      } catch (error) {
+        setNotice(`${count} products were imported, but the catalog could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
     } catch (error) {
       setNotice(productSaveError(error, "Unable to import products."));
     } finally {
@@ -1639,8 +1657,7 @@ export default function Home() {
                   setEditingProductImage(product);
                 }}
                 onRemove={removeProduct}
-                onImport={importProducts}
-                isImporting={isImporting}
+                onImport={() => setShowImport(true)}
                 onRestock={setRestockProduct}
               />
             ) : currentView === "orders" ? (
@@ -1882,6 +1899,7 @@ export default function Home() {
         </div>
       )}
       {quickAdd && <QuickAddDialog initial={quickAdd} onAdd={addCustomItem} onClose={() => setQuickAdd(null)} />}
+      {showImport && isAdmin && <ImportProductsDialog prepare={prepareImport} onImport={(preview) => void importProducts(preview)} onClose={() => setShowImport(false)} isImporting={isImporting} />}
       {restockProduct && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) setRestockProduct(null); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="restock-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
@@ -2174,6 +2192,151 @@ function ProductArtwork({ product, className = "" }: { product: Product; classNa
   );
 }
 
+function downloadImportTemplate() {
+  const blob = new Blob([new Uint8Array(buildTemplateXlsx())], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "products-template.xlsx";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+// Import products from Excel, CSV or JSON: choose a file, review what will
+// change, then import. Nothing is saved until Import is pressed.
+function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
+  prepare: (file: File) => Promise<ImportPreview>;
+  onImport: (preview: ImportPreview) => void;
+  onClose: () => void;
+  isImporting: boolean;
+}) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [error, setError] = useState("");
+  const [isReading, setIsReading] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  useFunctionKeys({ F1: () => fileInputRef.current?.click(), F2: downloadImportTemplate }, !isImporting);
+  const submitRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    // Enter imports from anywhere in the dialog except a focused button/link,
+    // which keeps its own Enter behaviour.
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || (event.target as HTMLElement | null)?.closest("button, a")) return;
+      event.preventDefault();
+      submitRef.current();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  async function readFile(file: File | undefined) {
+    if (!file) return;
+    setIsReading(true);
+    setError("");
+    setPreview(null);
+    try {
+      setPreview(await prepare(file));
+    } catch (caughtError) {
+      setError(caughtError instanceof Error ? caughtError.message : "Unable to read that file.");
+    } finally {
+      setIsReading(false);
+    }
+  }
+
+  const newCount = preview?.products.filter((product) => !product.isUpdate).length ?? 0;
+  const updateCount = (preview?.products.length ?? 0) - newCount;
+  const canImport = !!preview && preview.products.length > 0 && preview.errors.length === 0 && !isImporting;
+  useEffect(() => {
+    submitRef.current = () => { if (canImport && preview) onImport(preview); };
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isImporting) onClose(); }}>
+      <div role="dialog" aria-modal="true" aria-labelledby="import-title" className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl dark:bg-slate-900">
+        <div className="flex items-start justify-between border-b border-slate-100 p-6 pb-4 dark:border-slate-800">
+          <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="import-title" className="mt-1 text-xl font-semibold">Import products</h2><p className="mt-1 text-sm text-slate-500">Excel (.xlsx), CSV, or JSON. Products are matched by name: existing names are updated, new names are added.</p></div>
+          <button type="button" aria-label="Close import (Esc)" disabled={isImporting} onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50 dark:hover:bg-slate-800"><X size={18} /></button>
+        </div>
+        <form
+          className="flex min-h-0 flex-1 flex-col"
+          onSubmit={(event) => { event.preventDefault(); if (canImport && preview) onImport(preview); }}
+        >
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-6 pt-4">
+            <label
+              onDragOver={(event) => { event.preventDefault(); setIsDragging(true); }}
+              onDragLeave={() => setIsDragging(false)}
+              onDrop={(event) => { event.preventDefault(); setIsDragging(false); void readFile(event.dataTransfer.files[0]); }}
+              className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-4 py-6 text-center transition ${isDragging ? "border-blue-400 bg-blue-50 dark:bg-blue-950/30" : "border-slate-200 hover:border-blue-300 dark:border-slate-700"}`}
+            >
+              <FileSpreadsheet size={26} className="text-emerald-600" />
+              <span className="text-sm font-semibold">{isReading ? "Reading file…" : preview ? preview.fileName : "Drop a file here or choose one"}</span>
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600">{preview ? "Choose a different file" : "Choose file"} <Kbd>F1</Kbd></span>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".xlsx,.csv,.json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/json"
+                className="sr-only"
+                onChange={(event) => { void readFile(event.currentTarget.files?.[0]); event.currentTarget.value = ""; }}
+              />
+            </label>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-slate-50 px-4 py-3 text-xs dark:bg-slate-800">
+              <span className="text-slate-500">Columns: {importColumns.map((column) => <span key={column.field} className={column.required ? "font-semibold text-slate-700 dark:text-slate-200" : ""}>{column.header}{column.required ? "*" : ""}{column.field !== importColumns[importColumns.length - 1].field ? ", " : ""}</span>)}</span>
+              <button type="button" onClick={downloadImportTemplate} className="inline-flex items-center gap-1.5 font-semibold text-emerald-700 hover:text-emerald-800"><Download size={13} /> Excel template <Kbd>F2</Kbd></button>
+            </div>
+
+            {error && <div role="alert" className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</div>}
+
+            {preview && (
+              <>
+                <div className="grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800"><p className="text-lg font-semibold">{newCount}</p><p className="text-[11px] text-slate-500">New products</p></div>
+                  <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800"><p className="text-lg font-semibold">{updateCount}</p><p className="text-[11px] text-slate-500">Updates</p></div>
+                  <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800"><p className="text-lg font-semibold">{preview.newCategories.length}</p><p className="text-[11px] text-slate-500">New categories</p></div>
+                </div>
+                {preview.newCategories.length > 0 && <p className="text-xs text-slate-500">New categories: <span className="font-medium text-slate-700 dark:text-slate-200">{preview.newCategories.join(", ")}</span></p>}
+                {preview.errors.length > 0 && (
+                  <div role="alert" className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-xs text-red-700">
+                    <p className="font-semibold">Fix {preview.errors.length} row{preview.errors.length === 1 ? "" : "s"} in the file, then choose it again:</p>
+                    <ul className="mt-1.5 max-h-32 list-disc space-y-0.5 overflow-y-auto pl-4">{preview.errors.map((message) => <li key={message}>{message}</li>)}</ul>
+                  </div>
+                )}
+                {preview.products.length > 0 && (
+                  <div className="overflow-x-auto rounded-xl border border-slate-100 dark:border-slate-800">
+                    <table className="w-full min-w-[560px] text-left text-xs">
+                      <thead className="bg-slate-50 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:bg-slate-800"><tr><th className="px-3 py-2">Row</th><th className="px-3 py-2">Product</th><th className="px-3 py-2">Category</th><th className="px-3 py-2 text-right">Retail</th><th className="px-3 py-2 text-right">Wholesale</th><th className="px-3 py-2 text-right">Stock</th><th className="px-3 py-2"></th></tr></thead>
+                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                        {preview.products.slice(0, 50).map((product) => (
+                          <tr key={product.sourceRow}>
+                            <td className="px-3 py-2 text-slate-400">{product.sourceRow}</td>
+                            <td className="px-3 py-2 font-medium">{product.name}{product.barcode && <span className="block font-mono text-[10px] font-normal text-slate-400">{product.barcode}</span>}</td>
+                            <td className="px-3 py-2 text-slate-500">{product.category}</td>
+                            <td className="px-3 py-2 text-right">{money(product.price)}</td>
+                            <td className="px-3 py-2 text-right text-slate-500">{product.wholesale_price !== undefined ? money(product.wholesale_price) : "—"}</td>
+                            <td className="px-3 py-2 text-right">{product.stock}</td>
+                            <td className="px-3 py-2"><span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${product.isUpdate ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.isUpdate ? "Update" : "New"}</span></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {preview.products.length > 50 && <p className="border-t border-slate-100 px-3 py-2 text-[11px] text-slate-400 dark:border-slate-800">…and {preview.products.length - 50} more.</p>}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+          <div className="flex gap-3 border-t border-slate-100 p-6 pt-4 dark:border-slate-800">
+            <button type="button" disabled={isImporting} onClick={onClose} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700">Cancel <Kbd>Esc</Kbd></button>
+            <button type="submit" disabled={!canImport} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{isImporting ? "Importing…" : <>Import {preview?.products.length ? `${preview.products.length} product${preview.products.length === 1 ? "" : "s"}` : ""} <Kbd>Enter</Kbd></>}</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // Sell something that isn't in the product catalog. Price (each) and amount
 // (line total) stay in sync through the quantity, so either can be entered.
 function QuickAddDialog({ initial, onAdd, onClose }: {
@@ -2437,14 +2600,13 @@ function CartPanel({ items, quantities, count, subtotal, total, onChange, onChec
   );
 }
 
-function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, onImport, isImporting, onRestock }: {
+function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, onImport, onRestock }: {
   products: Product[];
   onAdd: () => void;
   onEditPrices: (product: Product) => void;
   onEditImage: (product: Product) => void;
   onRemove: (product: Product) => void;
-  onImport: (file: File) => void;
-  isImporting: boolean;
+  onImport: () => void;
   onRestock: (product: Product) => void;
 }) {
   const lowStock = products.filter((product) => product.stock < 10).length;
@@ -2453,11 +2615,11 @@ function InventoryView({ products, onAdd, onEditPrices, onEditImage, onRemove, o
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Inventory</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Inventory</h1><p className="mt-1 text-sm text-slate-500">Keep your products and stock levels up to date.</p></div>
         <div className="flex flex-wrap gap-2">
-          <label className={`flex h-10 cursor-pointer items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 ${isImporting ? "pointer-events-none opacity-60" : ""}`}><FileUp size={16} />{isImporting ? "Importing…" : "Import CSV / JSON"}<input type="file" accept=".csv,.json,text/csv,application/json" className="sr-only" disabled={isImporting} onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file) onImport(file); event.currentTarget.value = ""; }} /></label>
+          <button type="button" onClick={onImport} className="flex h-10 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><FileSpreadsheet size={16} className="text-emerald-600" /> Import products</button>
           <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><PackagePlus size={16} /> Add product</button>
         </div>
       </div>
-      <p className="mb-4 text-xs text-slate-400">Import CSV or JSON with <code className="rounded bg-slate-100 px-1 py-0.5">name, category, cost_price, wholesale_price, retail_price, stock</code> fields, plus an optional <code className="rounded bg-slate-100 px-1 py-0.5">barcode</code>. New category names in the file become new categories. Older imports with <code className="rounded bg-slate-100 px-1 py-0.5">price</code> remain supported.</p>
+      <p className="mb-4 text-xs text-slate-400">Import an Excel (.xlsx), CSV, or JSON file with Product Name, Category, Retail Price and Stock columns, plus optional Wholesale Price, Cost Price and Barcode. Use Import products to download the Excel template and preview changes before saving.</p>
       <div className="mb-5 grid gap-3 sm:grid-cols-3">
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Total products</p><p className="mt-2 text-2xl font-semibold">{products.length}</p></div>
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Units in stock</p><p className="mt-2 text-2xl font-semibold">{products.reduce((sum, product) => sum + product.stock, 0)}</p></div>
