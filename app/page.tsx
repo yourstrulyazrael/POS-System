@@ -399,12 +399,19 @@ function normalizeCategory(value: unknown, existing: string[]) {
 }
 
 // Barcodes are stored as scanned: 1–64 printable ASCII characters, no spaces.
+// Spaces are removed, so one typed or copied the way it's printed
+// ("4 800016 644290") is stored as scanned ("4800016644290").
 // Returns null for an empty value and undefined for an invalid one.
 function normalizeBarcode(value: unknown) {
   if (value === undefined || value === null) return null;
-  const barcode = String(value).trim();
+  const barcode = compactBarcode(String(value));
   if (!barcode) return null;
   return /^[!-~]{1,64}$/.test(barcode) ? barcode : undefined;
+}
+
+// Barcode lookups ignore spaces the same way.
+function compactBarcode(value: string) {
+  return value.replace(/\s+/g, "");
 }
 
 function productSaveError(error: unknown, fallback: string) {
@@ -466,7 +473,7 @@ function validateImportedProducts(records: RawProductRecord[]) {
     if (record.stock === undefined || record.stock === "" || !Number.isInteger(stock) || stock < 0) problems.push("a whole-number stock of 0 or more");
     if (costText && (!Number.isFinite(costPrice) || costPrice < 0)) problems.push(`a cost price of ₱0 or more, or blank (found “${costText}”)`);
     if (wholesaleText && (!Number.isFinite(wholesalePrice) || wholesalePrice < 0)) problems.push(`a wholesale price of ₱0 or more, or blank (found “${wholesaleText}”)`);
-    if (barcode === undefined) problems.push("a barcode without spaces (up to 64 characters), or blank");
+    if (barcode === undefined) problems.push("a barcode of up to 64 letters, digits or symbols, or blank");
     if (!productIcons.some((icon) => icon.id === imageIcon)) problems.push("a valid image icon, or blank");
     if (problems.length) {
       errors.push(`${row} needs ${problems.join(", ")}.`);
@@ -620,7 +627,7 @@ export default function Home() {
       products.filter(
         (product) =>
           (activeCategory === "All items" || product.category === activeCategory) &&
-          (product.name.toLowerCase().includes(searchTerm.toLowerCase()) || (!!searchTerm && product.barcode === searchTerm)),
+          (product.name.toLowerCase().includes(searchTerm.toLowerCase()) || (!!searchTerm && product.barcode === compactBarcode(searchTerm))),
       ),
     [activeCategory, products, searchTerm],
   );
@@ -1228,7 +1235,7 @@ export default function Home() {
       if (quantity !== null) setNotice(`Now scan or type the item to add ${formatQuantity(quantity)} of it.`);
       return;
     }
-    const product = products.find((item) => item.barcode === term) ?? (visibleProducts.length === 1 ? visibleProducts[0] : undefined);
+    const product = products.find((item) => item.barcode === compactBarcode(term)) ?? (visibleProducts.length === 1 ? visibleProducts[0] : undefined);
     if (!product && visibleProducts.length > 1) {
       setNotice(`${visibleProducts.length} products match “${term}”. Keep typing or pick one.`);
       keepEntry();
@@ -1459,7 +1466,7 @@ export default function Home() {
   useEffect(() => {
     submitSaleEntryRef.current = submitSaleEntry;
   });
-  const entryMatchesBarcode = !!searchTerm && products.some((product) => product.barcode === searchTerm);
+  const entryMatchesBarcode = !!searchTerm && products.some((product) => product.barcode === compactBarcode(searchTerm));
   useEffect(() => {
     if (activePage !== "pos" || !entryMatchesBarcode) return;
     const timer = window.setTimeout(() => submitSaleEntryRef.current(), 150);
@@ -2001,7 +2008,7 @@ export default function Home() {
       return;
     }
     if (barcode === undefined) {
-      setNotice("Enter a barcode of up to 64 letters, digits, or symbols without spaces.");
+      setNotice("Enter a barcode of up to 64 letters, digits, or symbols.");
       return;
     }
     if (selectedProductImage && (
@@ -2142,7 +2149,7 @@ export default function Home() {
       return;
     }
     if (barcode === undefined) {
-      setNotice("Enter a barcode of up to 64 letters, digits, or symbols without spaces.");
+      setNotice("Enter a barcode of up to 64 letters, digits, or symbols.");
       return;
     }
     setIsLoading(true);
@@ -3974,8 +3981,7 @@ function BarcodeField({ defaultValue = "" }: { defaultValue?: string }) {
         <input
           name="barcode"
           defaultValue={defaultValue}
-          maxLength={64}
-          pattern="[!-~]{1,64}"
+          maxLength={80}
           autoComplete="off"
           placeholder="Scan or type the barcode"
           // Scanners end with Enter; keep it from submitting the form.
