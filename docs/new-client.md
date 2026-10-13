@@ -62,8 +62,11 @@ npx supabase link --project-ref <project-ref>
 npx supabase db push
 ```
 
-Then publish the release as usual. Keep database changes backward compatible:
-tills update at different times.
+Then publish the release on the public releases repository,
+https://github.com/yourstrulyazrael/POS-System-Releases (tag `vX.Y.Z`, with the
+`.exe`, `.exe.blockmap` and `latest.yml` from `dist-desktop`). The source code
+repository is private; installed apps only read the releases repository. Keep
+database changes backward compatible: tills update at different times.
 
 ## Built-in store
 
