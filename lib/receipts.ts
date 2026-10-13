@@ -13,7 +13,7 @@ export type StoreDetails = {
 };
 
 export const defaultStoreDetails: StoreDetails = {
-  storeName: "Clover & Co.",
+  storeName: "", // set in Account → Store details; receipts print "Store" until then
   address: "",
   phone: "",
   tin: "",

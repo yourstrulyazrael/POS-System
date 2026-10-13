@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, Moon, ReceiptText, RefreshCw, Store, Sun } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { StoreName } from "@/components/store-name";
 
 type ShiftPeriod = "today" | "7days" | "30days";
 type ShiftType = "day" | "night";
@@ -147,7 +148,7 @@ export function ShiftHistoryView({ isAdmin }: { isAdmin: boolean }) {
     <section>
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
-          <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Shifts</span></div>
+          <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Shifts</span></div>
           <h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Shift history</h1>
           <p className="mt-1 text-sm text-slate-500">{isAdmin ? "Orders and sales processed by each employee, per shift." : "Orders and sales you processed, per shift."} Day 6 AM–6 PM · Night 6 PM–6 AM.</p>
         </div>

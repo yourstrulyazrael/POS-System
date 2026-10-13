@@ -76,7 +76,7 @@ export function ConnectStoreScreen({ current, onCancel }: { current: StoreConnec
       <div className="w-full max-w-[460px]">
         <div className="mb-8 flex items-center gap-3">
           <span className="grid h-11 w-11 place-items-center rounded-xl bg-blue-600 text-white"><Store size={20} /></span>
-          <div><p className="text-sm font-semibold">Clover &amp; Co. POS</p><p className="text-xs text-slate-500">Point of sale</p></div>
+          <div><p className="text-sm font-semibold">Point of sale</p><p className="text-xs text-slate-500">Store connection</p></div>
         </div>
         <p className="mb-2 text-sm font-semibold text-blue-700 dark:text-blue-400">{current ? "CHANGE STORE" : "FIRST-TIME SETUP"}</p>
         <h1 className="text-3xl font-semibold tracking-tight">Connect to your store</h1>

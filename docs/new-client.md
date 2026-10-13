@@ -45,7 +45,10 @@ store name, URL and publishable key, so it's safe to give to the store.
 3. Create the store's first admin: **Create the first admin** on the sign-in
    screen, using the `POS_SETUP_SECRET` from step 2. The setup page shows
    which store you're creating it for.
-4. The admin then adds employees and products (Inventory → Import products).
+4. The admin signs in and sets **Account → Store details** first: the store
+   name there is shown throughout the app and printed on receipts (a new
+   database starts as "Clover & Co."). Then they add employees and products
+   (Inventory → Import products).
 
 Each till only needs the code once; it's remembered, also offline.
 Switching a till to another store is refused while sales or a drawer count

@@ -60,7 +60,7 @@ export function AdminSetupForm() {
       <div className="fixed right-4 top-4"><ThemeSwitcher /></div>
       <section className="w-full max-w-md rounded-2xl border border-slate-100 bg-white p-7 shadow-xl shadow-blue-900/5 dark:border-slate-800 dark:bg-slate-900 sm:p-9">
         <div className="mb-6 flex h-12 w-12 items-center justify-center rounded-xl bg-blue-600 text-white"><Coffee size={23} /></div>
-        <p className="text-xs font-bold tracking-widest text-blue-600">CLOVER &amp; CO.</p>
+        <p className="text-xs font-bold tracking-widest text-blue-600">FIRST-TIME SETUP</p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">Set up your store admin</h1>
         {storeLabel && <p className="mt-2 text-xs text-slate-500">Store: <b className="font-semibold text-slate-700 dark:text-slate-200">{storeLabel}</b></p>}
         <p className="mt-2 text-sm leading-6 text-slate-500">Create the first administrator. This one-time setup closes automatically after an admin account exists.</p>

@@ -9,7 +9,7 @@ const defaultUrl = process.env.VERCEL_URL
 
 export const metadata: Metadata = {
   metadataBase: new URL(defaultUrl),
-  title: "Clover & Co. | Point of Sale",
+  title: "Point of sale", // the app sets "<store name> · Point of sale" once it knows the store
   description: "A simple point-of-sale workspace for store teams.",
 };
 

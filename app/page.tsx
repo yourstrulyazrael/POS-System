@@ -58,6 +58,7 @@ import {
 import { AUTH_STORAGE_KEY, callPosAdmin, createClient } from "@/lib/supabase/client";
 import { loadStoreConnection, projectRef, type StoreConnection } from "@/lib/store-connection";
 import { ConnectStoreScreen } from "@/components/connect-store";
+import { StoreName, StoreNameContext } from "@/components/store-name";
 import { deletePendingOrder, isNetworkError, listPendingOrders, readCache, savePendingOrder, storedSessionUserId, writeCache, type PendingOrder } from "@/lib/offline-store";
 import { buildCashCountReport, buildRefundReceipt, buildSaleReceipt, defaultStoreDetails, type StoreDetails } from "@/lib/receipts";
 import { checkForUpdates, defaultHardwareSettings, installUpdate, isDesktopApp, loadHardwareSettings, openCashDrawer, printDocument, saveHardwareSettings, supportsLiveUpdates, watchUpdateStatus, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
@@ -75,7 +76,7 @@ import { CartResizeHandle, PosLayoutPanel } from "@/components/pos-layout-panel"
 import { CashCountDialog, DrawerStatusButton, HardwareSettingsCard, OpenDrawerDialog, ReconnectBanner, RecallDialog, RefundDialog, RefundIcon, StoreDetailsCard, SuspendDialog, UpdateReadyBar, UpdatesCard, VoidDialog, VoidIcon } from "@/components/pos-dialogs";
 import { listSuspendedOrders, MAX_SUSPENDED_ORDERS, saveSuspendedOrders, type SuspendedOrder } from "@/lib/suspended-orders";
 import { buildProductsXlsx, buildTemplateXlsx, importColumns, readProductFile, type RawProductRecord } from "@/lib/product-import";
-import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { FormEvent, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
 import Image from "next/image";
 
@@ -566,6 +567,11 @@ export default function Home() {
   const [showSyncPanel, setShowSyncPanel] = useState(false);
   const syncingRef = useRef(false);
   const [storeDetails, setStoreDetails] = useState<StoreDetails>(defaultStoreDetails);
+  // The store's name for branding and headings (components/store-name.tsx).
+  const brandName = (signedIn ? storeDetails.storeName.trim() : "") || storeConnection?.name.trim() || "Point of sale";
+  useEffect(() => {
+    document.title = brandName === "Point of sale" ? "Point of sale" : `${brandName} · Point of sale`;
+  }, [brandName]);
   const [hardware, setHardware] = useState<HardwareSettings>(defaultHardwareSettings);
   const [cashSession, setCashSession] = useState<CashSession | null>(null);
   const [showOpenDrawer, setShowOpenDrawer] = useState(false);
@@ -2601,7 +2607,7 @@ export default function Home() {
             <div className="absolute -right-28 -top-24 h-96 w-96 rounded-full border border-white/10" />
             <div className="absolute -right-12 -top-10 h-64 w-64 rounded-full border border-white/10" />
             <div className="absolute -bottom-40 -left-24 h-96 w-96 rounded-full bg-blue-400/20 blur-3xl" />
-            <Brand light />
+            <Brand light name={brandName} />
             <div className="relative z-10 max-w-xl pb-12">
               <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3.5 py-2 text-sm font-medium text-blue-50">
                 <Sparkles size={15} /> Your store, running smoothly
@@ -2625,13 +2631,13 @@ export default function Home() {
                 <p className="text-sm text-blue-100">Made for the people behind the counter</p>
               </div>
             </div>
-            <p className="relative z-10 text-xs text-blue-200">Clover &amp; Co. · Point of sale</p>
+            <p className="relative z-10 text-xs text-blue-200">{brandName} · Point of sale</p>
           </section>
 
           <section className="relative flex items-center justify-center px-5 py-10 sm:px-10">
             <div className="absolute right-5 top-5"><ThemeSwitcher /></div>
             <div className="w-full max-w-[420px]">
-              <div className="mb-10 lg:hidden"><Brand /></div>
+              <div className="mb-10 lg:hidden"><Brand name={brandName} /></div>
               <div className="mb-8">
                 <p className="mb-2 text-sm font-semibold text-blue-700 dark:text-blue-400">WELCOME BACK</p>
                 <h2 className="text-3xl font-semibold tracking-tight">Sign in to your store</h2>
@@ -2685,7 +2691,7 @@ export default function Home() {
                 <span>You stay signed in on this computer until you sign out. Administrators create employee accounts from Employees.</span>
               </div>
               <p className="mt-5 text-center text-sm text-slate-500">Setting up a new store? <Link href="/setup-admin" className="font-semibold text-blue-700 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">Create the first admin</Link></p>
-              <p className="mt-8 text-center text-xs text-slate-400">Secure checkout starts here · Clover &amp; Co.</p>
+              <p className="mt-8 text-center text-xs text-slate-400">Secure checkout starts here · {brandName}</p>
             </div>
           </section>
         </div>
@@ -2697,6 +2703,7 @@ export default function Home() {
   const currentView = isAdmin ? activePage : activePage === "inventory" || activePage === "employees" ? "pos" : activePage;
 
   return (
+    <StoreNameContext.Provider value={brandName}>
     <main className={`min-h-screen bg-[#f5f8fd] text-slate-900 dark:bg-slate-950 dark:text-slate-100 ${currentView === "analytics" ? "analytics-report-print-mode" : ""}`}>
       <div className="flex min-h-screen">
         <div className="min-w-0 flex-1">
@@ -2705,8 +2712,8 @@ export default function Home() {
             {offlineSession && isOnline && <ReconnectBanner email={accountEmail} onReconnect={reconnectOnline} />}
             {!connected && <OfflineBanner signedIn waiting={waitingToSync} />}
             <div className="flex h-[72px] items-center gap-3 px-4 sm:px-7 xl:px-9">
-            <div className="shrink-0 xl:hidden"><Brand compact /></div>
-            <div className="hidden shrink-0 xl:block"><Brand /></div>
+            <div className="shrink-0 xl:hidden"><Brand compact name={brandName} /></div>
+            <div className="hidden shrink-0 xl:block"><Brand name={brandName} /></div>
             {/* Page icons; the name (and Alt+N shortcut) appears on hover or focus. */}
             <nav aria-label="Workspace navigation" className="ml-2 hidden flex-1 items-center gap-1 md:flex xl:ml-6">
               {navItems.map((item, index) => <NavIcon key={item.page} icon={item.icon} label={item.label} shortcut={`Alt+${index + 1}`} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
@@ -3017,7 +3024,7 @@ export default function Home() {
               </div>
             )}
           </div>
-          <footer className="px-4 pb-6 text-center text-[10px] text-slate-400 sm:px-7 xl:px-9">Clover &amp; Co. POS</footer>
+          <footer className="px-4 pb-6 text-center text-[10px] text-slate-400 sm:px-7 xl:px-9">{brandName} · Point of sale</footer>
         </div>
       </div>
 
@@ -3171,14 +3178,15 @@ export default function Home() {
         </div>
       )}
     </main>
+    </StoreNameContext.Provider>
   );
 }
 
-function Brand({ light = false, compact = false }: { light?: boolean; compact?: boolean }) {
+function Brand({ name, light = false, compact = false }: { name: string; light?: boolean; compact?: boolean }) {
   return (
     <div className="flex items-center gap-2.5">
       <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${light ? "bg-white/15 text-white" : "bg-blue-600 text-white"} ${compact ? "h-9 w-9" : ""}`}><Coffee size={compact ? 19 : 21} strokeWidth={2.2} /></div>
-      {!compact && <div><p className={`text-[15px] font-bold tracking-tight ${light ? "text-white" : "text-slate-900"}`}>Clover <span className={light ? "text-blue-200" : "text-blue-600"}>&amp; Co.</span></p><p className={`mt-0.5 text-[10px] ${light ? "text-blue-200" : "text-slate-400"}`}>POINT OF SALE</p></div>}
+      {!compact && <div><p className={`max-w-[220px] truncate text-[15px] font-bold tracking-tight ${light ? "text-white" : "text-slate-900"}`}>{name}</p><p className={`mt-0.5 text-[10px] ${light ? "text-blue-200" : "text-slate-400"}`}>POINT OF SALE</p></div>}
     </div>
   );
 }
@@ -3266,7 +3274,7 @@ function AdminOverview({
   return (
     <section>
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Dashboard</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Store dashboard</h1><p className="mt-1 text-sm text-slate-500">Live sales, team, and inventory performance.</p></div>
+        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Dashboard</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Store dashboard</h1><p className="mt-1 text-sm text-slate-500">Live sales, team, and inventory performance.</p></div>
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" onClick={onViewAnalytics} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><BarChart3 size={14} /> Analytics &amp; Reports</button>
           <select aria-label="Sales report period" value={period} onChange={(event) => onPeriodChange(event.target.value as SalesPeriod)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold outline-none focus:border-blue-400">
@@ -3356,7 +3364,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="help-center-title" className="max-h-[85vh] w-full max-w-xl overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
         <div className="mb-5 flex items-start justify-between">
-          <div className="flex items-start gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><CircleHelp size={20} /></div><div><p className="text-xs font-semibold text-blue-600">CLOVER &amp; CO. SUPPORT</p><h2 id="help-center-title" className="mt-1 text-xl font-semibold">Help center</h2><p className="mt-1 text-sm text-slate-500">Quick answers for everyday store tasks.</p></div></div>
+          <div className="flex items-start gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-50 text-blue-600"><CircleHelp size={20} /></div><div><p className="text-xs font-semibold text-blue-600">HELP &amp; SUPPORT</p><h2 id="help-center-title" className="mt-1 text-xl font-semibold">Help center</h2><p className="mt-1 text-sm text-slate-500">Quick answers for everyday store tasks.</p></div></div>
           <button type="button" aria-label="Close help center (Esc)" aria-keyshortcuts="Escape" onClick={onClose} className="flex items-center gap-1.5 rounded-lg p-2 text-slate-400 hover:bg-slate-50"><Kbd>Esc</Kbd><X size={18} /></button>
         </div>
         <div className="divide-y divide-slate-100 rounded-xl border border-slate-100 px-4">
@@ -3645,7 +3653,7 @@ const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g,
 // Builds a printable inventory report and opens the browser's print dialog
 // from a hidden frame (choose "Save as PDF"). The page title becomes the
 // suggested PDF file name.
-function exportInventoryPdf(items: Product[]) {
+function exportInventoryPdf(items: Product[], storeName: string) {
   const sorted = sortForReport(items);
   const units = sorted.reduce((sum, product) => sum + product.stock, 0);
   const retailValue = sorted.reduce((sum, product) => sum + product.price * product.stock, 0);
@@ -3677,7 +3685,7 @@ function exportInventoryPdf(items: Product[]) {
     tfoot td { font-weight: 700; border-top: 1px solid #cbd5e1; border-bottom: 0; }
     footer { margin-top: 10px; font-size: 8.5px; }
   </style></head><body>
-    <header><div><div class="muted">Clover &amp; Co. · Point of sale</div><h1>Inventory report</h1></div><div class="muted">Generated ${escapeHtml(generated)} · Asia/Manila</div></header>
+    <header><div><div class="muted">${escapeHtml(storeName)} · Point of sale</div><h1>Inventory report</h1></div><div class="muted">Generated ${escapeHtml(generated)} · Asia/Manila</div></header>
     <section class="summary">
       <div><span class="muted">Products</span><b>${sorted.length}</b></div>
       <div><span class="muted">Units in stock</span><b>${units}</b></div>
@@ -4247,11 +4255,12 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
   onImport: () => void;
   onRestock: (product: Product) => void;
 }) {
+  const storeName = useContext(StoreNameContext);
   const lowStock = products.filter((product) => product.stock < 10).length;
   return (
     <section>
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Inventory</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Inventory</h1><p className="mt-1 text-sm text-slate-500">Keep your products and stock levels up to date.</p></div>
+        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Inventory</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Inventory</h1><p className="mt-1 text-sm text-slate-500">Keep your products and stock levels up to date.</p></div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={onImport} className="flex h-10 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><FileSpreadsheet size={16} className="text-emerald-600" /> Import products</button>
           <DropdownMenu>
@@ -4259,7 +4268,7 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
             <DropdownMenuContent align="end" className="w-56 rounded-xl border-slate-100 bg-white p-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900">
               <DropdownMenuLabel className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Export {products.length} products</DropdownMenuLabel>
               <DropdownMenuItem onSelect={() => exportInventoryExcel(products)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><FileSpreadsheet className="text-emerald-600" /><span><span className="block font-semibold">Excel (.xlsx)</span><span className="block text-[10px] text-slate-400">Editable; can be imported again</span></span></DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => exportInventoryPdf(products)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><Printer className="text-red-500" /><span><span className="block font-semibold">PDF report</span><span className="block text-[10px] text-slate-400">Print, or choose Save as PDF</span></span></DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => exportInventoryPdf(products, storeName)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><Printer className="text-red-500" /><span><span className="block font-semibold">PDF report</span><span className="block text-[10px] text-slate-400">Print, or choose Save as PDF</span></span></DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
           <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><PackagePlus size={16} /> Add product</button>
@@ -4317,7 +4326,7 @@ function EmployeeView({ employees, onAdd, onRemove, onSetPassword }: {
   return (
     <section>
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Employees</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Team members</h1><p className="mt-1 text-sm text-slate-500">Create and manage secure employee sign-in accounts.</p></div>
+        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Employees</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Team members</h1><p className="mt-1 text-sm text-slate-500">Create and manage secure employee sign-in accounts.</p></div>
         <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><UserPlus size={16} /> Add employee</button>
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
@@ -4354,7 +4363,7 @@ function AccountView({
 }) {
   return (
     <section className="mx-auto max-w-3xl">
-      <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Account</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Account settings</h1><p className="mt-1 text-sm text-slate-500">Manage your sign-in details and store history.</p></div>
+      <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Account</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Account settings</h1><p className="mt-1 text-sm text-slate-500">Manage your sign-in details and store history.</p></div>
       <div className="space-y-5">
         <form onSubmit={onUpdateName} className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
           <div className="mb-4"><h2 className="text-sm font-semibold">Account name</h2><p className="mt-1 text-xs leading-5 text-slate-500">This name appears in the POS workspace and account profile.</p></div>
@@ -4434,7 +4443,7 @@ function OrdersView({ orders, isAdmin, userName, connected, onPrint, onVoid, onR
 
   return (
     <section>
-      <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">Orders</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Recent orders</h1><p className="mt-1 text-sm text-slate-500">A quick look at your latest transactions.</p></div>
+      <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Orders</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Recent orders</h1><p className="mt-1 text-sm text-slate-500">A quick look at your latest transactions.</p></div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800 sm:flex-row sm:items-center">
           <div><h2 className="text-sm font-semibold">Order history</h2><p className="mt-1 text-xs text-slate-400">Showing {visibleOrders.length} of {orders.length} recent transactions</p></div>
