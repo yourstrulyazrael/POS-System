@@ -129,6 +129,7 @@ type OrderRow = {
   refunded_total: number | string;
   void_reason: string | null;
   client_order_id: string | null;
+  receipt_number?: string | null;
   payment_method: PaymentMethod;
   payment_reference_last4: string | null;
   cash_received: number | string | null;
@@ -156,6 +157,9 @@ type Employee = { id: string; email: string; full_name: string; role: "employee"
 type DashboardStats = { sales_total: number; orders_today: number; active_products: number; units_in_stock: number; active_employees: number };
 type SalesPeriod = "today" | "7days" | "30days";
 type Page = "dashboard" | "analytics" | "pos" | "inventory" | "orders" | "shifts" | "employees" | "account";
+
+const POS_DISPLAY_LIMIT = 200;
+const INVENTORY_PAGE_SIZE = 100;
 
 const money = (amount: number) =>
   new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(amount);
@@ -227,7 +231,7 @@ type StockShortfall = { id: string; productName: string; shortfall: number; crea
 function pendingToOrder(sale: PendingOrder): Order {
   const createdAt = new Date(sale.createdAt);
   return {
-    id: `#${sale.clientOrderId.slice(0, 8)}`,
+    id: sale.receiptNumber ?? `#${sale.clientOrderId.slice(0, 8)}`,
     fullId: sale.clientOrderId,
     createdAt,
     lines: sale.items.map((item) => ({
@@ -263,11 +267,23 @@ function isTransientSyncError(error: unknown) {
   return /jwt|token|session|authentication required|503|502|504/i.test(message);
 }
 
+// Supabase returns at most 1,000 rows per request, so large lists are read
+// page by page until a page comes back empty.
+async function fetchAllRows<T>(page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>) {
+  const rows: T[] = [];
+  for (;;) {
+    const { data, error } = await page(rows.length, rows.length + 999);
+    if (error) return { data: null, error };
+    if (!data?.length) return { data: rows, error: null };
+    rows.push(...data);
+  }
+}
+
 async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod = "today") {
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
-    supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url, barcode").eq("active", true).order("name").returns<ProductRow[]>(),
-    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, status, refunded_total, void_reason, client_order_id, order_items(id, quantity, product_name, unit_price, product_id, is_wholesale, refund_items(quantity))").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
+    fetchAllRows<ProductRow>((from, to) => supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url, barcode").eq("active", true).order("name").order("id").range(from, to).returns<ProductRow[]>()),
+    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, status, refunded_total, void_reason, client_order_id, receipt_number, order_items(id, quantity, product_name, unit_price, product_id, is_wholesale, refund_items(quantity))").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   // Receipt header; optional until the refunds/receipts migration is applied.
   const storeResult = await supabase.from("store_settings").select("store_name, address, phone, tin, receipt_footer").eq("id", 1).maybeSingle();
@@ -345,7 +361,8 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
     orders: ordersResult.data.map((order): Order => ({
       // The receipt number is the sale's one-time id, so receipts printed offline
       // match the order after it syncs.
-      id: `#${(order.client_order_id ?? order.id).slice(0, 8)}`,
+      // Receipt number (062526-0001); older sales without one keep the short id.
+      id: order.receipt_number ?? `#${(order.client_order_id ?? order.id).slice(0, 8)}`,
       fullId: order.id,
       createdAt: new Date(order.created_at),
       // A line without a product_id is a custom item (or a since-deleted product).
@@ -658,6 +675,9 @@ export default function Home() {
       ),
     [activeCategory, products, searchTerm],
   );
+  // Drawing thousands of rows slows the till down; search, scanning and the
+  // category filter still reach every product.
+  const shownProducts = visibleProducts.slice(0, POS_DISPLAY_LIMIT);
   // The cart holds one line per product and price tier: items added while
   // wholesale mode is on go on that product's wholesale line, so one sale can
   // have 24 pcs at wholesale and 1 pc at retail of the same product.
@@ -1618,25 +1638,27 @@ export default function Home() {
       if (!data || typeof data !== "object" || !("order_id" in data) || typeof data.order_id !== "string") {
         throw new Error("Checkout completed, but the order confirmation was invalid.");
       }
-      const newOrderId = sale.clientOrderId.slice(0, 8);
+      const { data: numbered } = await supabase.from("orders").select("receipt_number").eq("id", data.order_id).maybeSingle();
+      const receiptNumber = numbered && typeof numbered.receipt_number === "string" ? numbered.receipt_number : undefined;
+      const newOrderId = receiptNumber ?? `#${sale.clientOrderId.slice(0, 8)}`;
       // The database sets the prices. If its total differs from the screen
       // (a price changed since the products loaded, or the database needs
       // updating), say so rather than letting the till be off silently.
       const recordedTotal = "total" in data ? Number(data.total) : total;
       const totalMismatch = Number.isFinite(recordedTotal) && Math.abs(recordedTotal - total) >= 0.01;
-      void afterSale(totalMismatch ? { ...sale, total: recordedTotal } : sale, false, printThisSale);
+      void afterSale({ ...sale, receiptNumber, ...(totalMismatch ? { total: recordedTotal } : {}) }, false, printThisSale);
       const wasWholesale = sale.wholesale;
       clearOrder();
       setShowCheckoutDialog(false);
       setCashReceived("");
       setPaymentReferenceLast4("");
       setNotice(totalMismatch
-        ? `Order #${newOrderId} was recorded at ${money(recordedTotal)}, not the ${money(total)} shown. A price may have changed, or the database needs updating (npx supabase db push). Check the order and the change given.`
-        : `${wasWholesale ? "Order with wholesale items" : "Order"} #${newOrderId} placed successfully.`);
+        ? `Order ${newOrderId} was recorded at ${money(recordedTotal)}, not the ${money(total)} shown. A price may have changed, or the database needs updating (npx supabase db push). Check the order and the change given.`
+        : `${wasWholesale ? "Order with wholesale items" : "Order"} ${newOrderId} placed successfully.`);
       try {
         await refreshWorkspace();
       } catch (error) {
-        setNotice(`Order #${newOrderId} was placed, but the store data could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+        setNotice(`Order ${newOrderId} was placed, but the store data could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
       }
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && (error.code === "PGRST202" || error.code === "42883")) {
@@ -2580,8 +2602,9 @@ export default function Home() {
     type RemovedProduct = { id: string; name: string; barcode: string | null };
     let removedProducts: RemovedProduct[] = [];
     if (!offlineSession && navigator.onLine) {
-      const lookup = createClient().from("products").select("id, name, barcode").eq("active", false).order("updated_at", { ascending: false })
-        .then(({ data }) => (data ?? []) as RemovedProduct[], () => []);
+      const supabase = createClient();
+      const lookup = fetchAllRows<RemovedProduct>((from, to) => supabase.from("products").select("id, name, barcode").eq("active", false).order("updated_at", { ascending: false }).order("id").range(from, to).returns<RemovedProduct[]>())
+        .then(({ data }) => data ?? [], () => []);
       removedProducts = await Promise.race([lookup, new Promise<RemovedProduct[]>((resolve) => window.setTimeout(() => resolve([]), 8000))]);
     }
     const knownCategories = [...productCategories];
@@ -3039,6 +3062,7 @@ export default function Home() {
                     </div>
                   )}
 
+                  {visibleProducts.length > POS_DISPLAY_LIMIT && <p className="mb-2 text-[11px] text-slate-500">Showing the first {POS_DISPLAY_LIMIT} of {visibleProducts.length.toLocaleString("en-PH")} products. Search, scan, or pick a category to find the others.</p>}
                   {visibleProducts.length === 0 ? (
                     <div className="grid min-h-64 place-items-center rounded-2xl border border-dashed border-slate-200 bg-white text-center dark:border-slate-700 dark:bg-slate-900">
                       <div><ShoppingBag size={28} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No products found</p><p className="mt-1 text-xs text-slate-400">Try another name or category, or sell it as a custom item.</p><button type="button" onClick={openQuickAdd} className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"><Plus size={14} /> Quick add custom item <Kbd>F3</Kbd></button></div>
@@ -3049,7 +3073,7 @@ export default function Home() {
                         <span className="hidden xl:block">Barcode</span><span>Product</span><span className="hidden text-right lg:block">Stock</span><span className="text-right">Price</span>
                       </div>
                       <div className="divide-y divide-slate-100 dark:divide-slate-800" onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
-                        {visibleProducts.map((product) => {
+                        {shownProducts.map((product) => {
                           const left = product.stock - quantityInCart(product.id);
                           const showWholesale = wholesaleMode && product.wholesalePrice > 0;
                           return (
@@ -3068,7 +3092,7 @@ export default function Home() {
                     </div>
                   ) : (
                     <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(${posLayout.tileSize}px, 100%), 1fr))` }} onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
-                      {visibleProducts.map((product) => {
+                      {shownProducts.map((product) => {
                         const unavailable = product.stock <= quantityInCart(product.id);
                         const showWholesale = wholesaleMode && product.wholesalePrice > 0;
                         return (
@@ -4338,6 +4362,17 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
 }) {
   const storeName = useContext(StoreNameContext);
   const lowStock = products.filter((product) => product.stock < 10).length;
+  // Search (name, category or barcode) and pages, so large catalogs stay quick.
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(0);
+  const term = query.trim().toLowerCase();
+  const compactTerm = compactBarcode(term);
+  const matching = term
+    ? products.filter((product) => product.name.toLowerCase().includes(term) || product.category.toLowerCase().includes(term) || (!!compactTerm && !!product.barcode?.toLowerCase().includes(compactTerm)))
+    : products;
+  const pageCount = Math.max(1, Math.ceil(matching.length / INVENTORY_PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const pageItems = matching.slice(currentPage * INVENTORY_PAGE_SIZE, (currentPage + 1) * INVENTORY_PAGE_SIZE);
   return (
     <section>
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
@@ -4378,8 +4413,8 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
         <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Running low</p><p className="mt-2 text-2xl font-semibold">{lowStock}<span className="ml-2 text-xs font-medium text-amber-600">needs attention</span></p></div>
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length.toLocaleString("en-PH")} items in your catalog{term && <> · {matching.length.toLocaleString("en-PH")} match</>}</p></div><label className="flex h-9 w-full max-w-[260px] items-center gap-2 rounded-lg border border-slate-200 px-3 focus-within:border-blue-400 dark:border-slate-700"><Search size={14} className="shrink-0 text-slate-400" /><input value={query} onChange={(event) => { setQuery(event.currentTarget.value); setPage(0); }} placeholder="Search name, category or barcode" aria-label="Search products" className="w-full min-w-0 bg-transparent text-xs outline-none placeholder:text-slate-400" /></label></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{pageItems.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
                 <DropdownMenu>
                   <DropdownMenuTrigger aria-label={`Actions for ${product.name}`} title="Actions" className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-300 data-[state=open]:bg-slate-100 data-[state=open]:text-slate-700 dark:hover:bg-slate-800 dark:data-[state=open]:bg-slate-800">
                     <EllipsisVertical size={16} />
@@ -4393,6 +4428,17 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
                 </DropdownMenu>
                 <button type="button" aria-label={`Remove ${product.name}`} title="Remove product" onClick={() => onRemove(product)} className="grid h-8 w-8 place-items-center rounded-lg text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button>
               </div></td></tr>)}</tbody></table></div>
+        {matching.length === 0 && <p className="px-5 py-8 text-center text-xs text-slate-400">{term ? `No products match “${query.trim()}”.` : "No products yet."}</p>}
+        {pageCount > 1 && (
+          <div className="flex items-center justify-between gap-3 border-t border-slate-100 px-5 py-3 text-xs text-slate-500 dark:border-slate-800">
+            <span>{(currentPage * INVENTORY_PAGE_SIZE + 1).toLocaleString("en-PH")}–{Math.min((currentPage + 1) * INVENTORY_PAGE_SIZE, matching.length).toLocaleString("en-PH")} of {matching.length.toLocaleString("en-PH")}</span>
+            <span className="flex items-center gap-1.5">
+              <button type="button" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)} className="h-8 rounded-lg border border-slate-200 px-3 font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Previous</button>
+              <span className="px-1.5">Page {currentPage + 1} of {pageCount}</span>
+              <button type="button" disabled={currentPage >= pageCount - 1} onClick={() => setPage(currentPage + 1)} className="h-8 rounded-lg border border-slate-200 px-3 font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Next</button>
+            </span>
+          </div>
+        )}
       </div>
     </section>
   );

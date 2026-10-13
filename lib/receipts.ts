@@ -2,7 +2,7 @@
 // Each builder returns a complete HTML document: no scripts, no external
 // resources (blocked by its own CSP), every value escaped.
 
-import { formatQuantity, itemCountOf, lineAmount } from "@/lib/quantity";
+import { formatQuantity, lineAmount } from "@/lib/quantity";
 
 export type StoreDetails = {
   storeName: string;
@@ -47,15 +47,22 @@ function documentHtml(title: string, paperWidth: 58 | 80, body: string) {
   .total td { font-weight: 700; font-size: ${fontSize + 2}px; }
   .stamp { border: 1.5px solid #000; padding: 1mm; margin: 2mm 0; text-align: center; font-weight: 700; }
   .muted { font-size: ${fontSize - 1.5}px; }
+  table.items { table-layout: fixed; }
+  table.items td { padding: 0.5mm 0.8mm 0.5mm 0; }
+  table.items td:last-child { padding-right: 0; }
+  .items .head td { font-weight: 700; }
+  .items .num { text-align: right; white-space: nowrap; }
+  .items .desc { overflow-wrap: break-word; }
+  .items .rule { margin: 0.5mm 0; }
 </style></head><body>${body}</body></html>`;
 }
 
 function header(store: StoreDetails) {
   return `<div class="center">
-    <div class="store">${escapeHtml(store.storeName || "Store")}</div>
+    <div class="store">${escapeHtml((store.storeName || "Store").toUpperCase())}</div>
     ${store.address ? `<div>${escapeHtml(store.address)}</div>` : ""}
-    ${store.phone ? `<div>${escapeHtml(store.phone)}</div>` : ""}
-    ${store.tin ? `<div>TIN ${escapeHtml(store.tin)}</div>` : ""}
+    ${store.phone ? `<div>Tel: ${escapeHtml(store.phone)}</div>` : ""}
+    ${store.tin ? `<div>TIN: ${escapeHtml(store.tin)}</div>` : ""}
   </div>`;
 }
 
@@ -85,31 +92,73 @@ export type SaleReceipt = {
   reprint: boolean;
 };
 
+// Sale receipt, laid out like a classic till slip:
+//
+//            STORE NAME
+//        address · Tel: phone · TIN
+//   ---------------------------------
+//   RECEIPT #: 062526-0001
+//   DATE: 06/25/2026
+//   TIME: 10:53:00 AM
+//   ---------------------------------
+//    QTY  DESCRIPTION      PRICE  AMOUNT
+//   ---------------------------------
+//   2.00  MARLBORO GOLD   180.00  360.00
+//   ---------------------------------
+//   TOTAL AMOUNT DUE:           1,115.00
+//   CASH:                       1,200.00
+//   CHANGE:                        85.00
+//   ---------------------------------
+//    -Thank you for shopping with us!-
+//      THIS IS NOT A VALID INVOICE
+//      PLEASE ASK FOR VALID INVOICE
+const amount = (value: number) => value.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const manilaParts = (date: Date) => Object.fromEntries(
+  new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })
+    .formatToParts(date).map((part) => [part.type, part.value]),
+);
+
 export function buildSaleReceipt(store: StoreDetails, sale: SaleReceipt, paperWidth: 58 | 80) {
-  const items = sale.lines.reduce((sum, line) => sum + itemCountOf(line.quantity), 0);
+  const when = manilaParts(sale.createdAt);
+  const narrow = paperWidth === 58;
+  const wholesaleLines = sale.lines.some((line) => line.wholesale);
+  const method = methodLabel(sale.paymentMethod).toUpperCase();
   const body = `${header(store)}
     <div class="rule"></div>
-    <div>Receipt ${escapeHtml(sale.orderNumber)}</div>
-    <div>${escapeHtml(dateTime(sale.createdAt))}</div>
-    <div>Cashier: ${escapeHtml(sale.cashier)}</div>
-    ${sale.wholesale && !sale.lines.some((line) => line.wholesale) ? `<div class="bold">WHOLESALE PRICING</div>` : ""}
+    <div>RECEIPT #: ${escapeHtml(sale.orderNumber)}</div>
+    <div>DATE: ${when.month}/${when.day}/${when.year}</div>
+    <div>TIME: ${when.hour}:${when.minute}:${when.second} ${when.dayPeriod}</div>
+    ${sale.cashier ? `<div>CASHIER: ${escapeHtml(sale.cashier.toUpperCase())}</div>` : ""}
     ${sale.reprint ? `<div class="stamp">REPRINT</div>` : ""}
     ${sale.status === "voided" ? `<div class="stamp">VOIDED</div>` : ""}
     <div class="rule"></div>
-    ${linesTable(sale.lines)}
+    <table class="items">
+      <colgroup><col style="width:${narrow ? 8 : 12}mm"><col><col style="width:${narrow ? 11 : 15}mm"><col style="width:${narrow ? 13 : 17}mm"></colgroup>
+      <tr class="head"><td>QTY</td><td>DESCRIPTION</td><td class="num">PRICE</td><td class="num">AMOUNT</td></tr>
+      <tr><td colspan="4"><div class="rule"></div></td></tr>
+      ${sale.lines.map((line) => {
+        const description = `${escapeHtml(line.name.toUpperCase())}${line.wholesale ? " (W)" : ""}`;
+        const figures = `<td class="num">${amount(line.unitPrice)}</td><td class="num">${amount(lineAmount(line.unitPrice, line.quantity))}</td>`;
+        // 58 mm paper: the name gets its own line, the figures go below it.
+        return narrow
+          ? `<tr><td colspan="4" class="desc">${description}</td></tr><tr><td>${line.quantity.toFixed(2)}</td><td></td>${figures}</tr>`
+          : `<tr><td>${line.quantity.toFixed(2)}</td><td class="desc">${description}</td>${figures}</tr>`;
+      }).join("")}
+    </table>
+    ${wholesaleLines ? `<div class="muted">(W) WHOLESALE PRICE</div>` : sale.wholesale ? `<div class="muted">WHOLESALE PRICING</div>` : ""}
     <div class="rule"></div>
     <table>
-      ${row(`Items`, String(items))}
-      ${row("TOTAL", peso(sale.total), "total")}
-      ${row(`Paid by ${methodLabel(sale.paymentMethod)}`, sale.cashReceived !== null ? peso(sale.cashReceived) : peso(sale.total))}
-      ${sale.paymentReferenceLast4 ? row("Reference", `•••• ${escapeHtml(sale.paymentReferenceLast4)}`) : ""}
-      ${sale.cashReceived !== null ? row("Change", peso(sale.changeDue ?? 0)) : ""}
-      ${sale.refundedTotal > 0 && sale.status !== "voided" ? row("Refunded", `−${peso(sale.refundedTotal)}`) : ""}
+      ${row("TOTAL AMOUNT DUE:", amount(sale.total), "bold")}
+      ${sale.cashReceived !== null
+        ? `${row("CASH:", amount(sale.cashReceived))}${row("CHANGE:", amount(sale.changeDue ?? 0))}`
+        : `${row(`${method}:`, amount(sale.total))}${sale.paymentReferenceLast4 ? row("REFERENCE:", `****${escapeHtml(sale.paymentReferenceLast4)}`) : ""}`}
+      ${sale.refundedTotal > 0 && sale.status !== "voided" ? row("REFUNDED:", `-${amount(sale.refundedTotal)}`) : ""}
     </table>
-    ${sale.pendingSync ? `<div class="stamp muted">Recorded offline · syncs when online</div>` : ""}
+    ${sale.pendingSync ? `<div class="stamp muted">RECORDED OFFLINE · RECEIPT NUMBER IS GIVEN WHEN IT SYNCS</div>` : ""}
     <div class="rule"></div>
-    ${store.receiptFooter ? `<div class="center">${escapeHtml(store.receiptFooter)}</div>` : ""}
-    <div class="center muted">This is not an official receipt.</div>`;
+    ${store.receiptFooter ? `<div class="center">-${escapeHtml(store.receiptFooter)}-</div>` : ""}
+    <div class="center" style="margin-top:3mm">THIS IS NOT A VALID INVOICE</div>
+    <div class="center">PLEASE ASK FOR VALID INVOICE</div>`;
   return documentHtml(`Receipt ${sale.orderNumber}`, paperWidth, body);
 }
 

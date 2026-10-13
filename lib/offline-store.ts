@@ -12,6 +12,9 @@ export type PendingOrderItem =
 
 export type PendingOrder = {
   clientOrderId: string;
+  // Set once the database has numbered the sale (e.g. 062526-0001); a sale
+  // saved offline gets its number when it syncs.
+  receiptNumber?: string;
   employeeId: string;
   employeeName: string;
   createdAt: string; // ISO time of the sale at the till
