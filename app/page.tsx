@@ -38,6 +38,7 @@ import {
   Plus,
   ReceiptText,
   RefreshCw,
+  RotateCcw,
   ScanBarcode,
   Search,
   ShieldCheck,
@@ -145,7 +146,10 @@ const parseCartKey = (key: string) =>
     ? { productId: key.slice(0, -WHOLESALE_SUFFIX.length), wholesale: true }
     : { productId: key, wholesale: false };
 // A destructive action waiting for the user to confirm it.
-type ConfirmAction = { title: string; message: string; confirmLabel: string; onConfirm: () => Promise<void> };
+// tone "neutral" is for a choice that isn't destructive; a second action
+// (secondaryLabel/onSecondary) adds a third button between Cancel and confirm.
+type ConfirmAction = { title: string; message: string; confirmLabel: string; onConfirm: () => Promise<void>; tone?: "danger" | "neutral"; secondaryLabel?: string; onSecondary?: () => Promise<void> };
+type NewProductValues = { name: string; category: string; costPrice: number; wholesalePrice: number; price: number; stock: number; imageIcon: string; image: File | null; barcode: string | null };
 // A "Quick Add" line for something not in the product catalog.
 type CustomItem = { id: string; description: string; quantity: number; unitPrice: number };
 type Employee = { id: string; email: string; full_name: string; role: "employee" };
@@ -409,12 +413,24 @@ function normalizeBarcode(value: unknown) {
   return /^[!-~]{1,64}$/.test(barcode) ? barcode : undefined;
 }
 
+// Product names are saved without spaces at the ends and with single spaces
+// inside (the database does the same), and are unique ignoring capitals.
+function normalizeProductName(value: unknown) {
+  return String(value ?? "").trim().replace(/\s+/g, " ");
+}
+function productNameKey(name: string) {
+  return normalizeProductName(name).toLowerCase();
+}
+
 // Barcode lookups ignore spaces the same way.
 function compactBarcode(value: string) {
   return value.replace(/\s+/g, "");
 }
 
 function productSaveError(error: unknown, fallback: string) {
+  if (error && typeof error === "object" && "code" in error && error.code === "23505" && "message" in error && String(error.message).includes("products_active_name_key")) {
+    return "Another product already has that name (names are compared ignoring capitals and spaces).";
+  }
   if (isNetworkError(error)) {
     return "This needs an internet connection. Sales still work offline; try this again once you’re back online.";
   }
@@ -441,7 +457,9 @@ type ImportedProduct = {
 // out so an import doesn't overwrite values already set on a product.
 type ImportPreview = {
   fileName: string;
-  products: (ImportedProduct & { sourceRow: number; isUpdate: boolean })[];
+  // status: how the row will be saved; renamedFrom: the existing product's
+  // name when it was matched by barcode under a different name.
+  products: (ImportedProduct & { sourceRow: number; isUpdate: boolean; status: "new" | "update" | "restore"; renamedFrom?: string })[];
   errors: string[];
   newCategories: string[];
   // Active products the file doesn't include (removed if imported as a master list).
@@ -456,7 +474,7 @@ function validateImportedProducts(records: RawProductRecord[]) {
   for (const record of records) {
     const row = `Row ${record.sourceRow}`;
     const problems: string[] = [];
-    const name = (record.name ?? "").trim();
+    const name = normalizeProductName(record.name);
     const category = (record.category ?? "").trim();
     const price = Number(record.retail_price);
     const stock = Number(record.stock);
@@ -1995,7 +2013,7 @@ export default function Home() {
   async function addProduct(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
-    const name = String(formData.get("name") ?? "").trim();
+    const name = normalizeProductName(formData.get("name"));
     const costPrice = Number(formData.get("cost_price"));
     // Optional: blank means the product isn't sold wholesale (stored as 0).
     const wholesalePrice = optionalPrice(formData.get("wholesale_price"));
@@ -2018,62 +2036,107 @@ export default function Home() {
       setNotice("Choose a JPEG, PNG, or WebP image that is no larger than 5 MB.");
       return;
     }
-    if (!name || !Number.isFinite(costPrice) || costPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(price) || price <= 0 || !Number.isInteger(stock) || stock < 0) {
+    if (!name || name.length > 120 || !Number.isFinite(costPrice) || costPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(price) || price <= 0 || !Number.isInteger(stock) || stock < 0) {
       setNotice("Enter a product name, a valid cost price, a wholesale price of ₱0 or more (or leave it blank), a retail price above ₱0, and a valid stock quantity.");
       return;
     }
-    let uploadedPath: string | null = null;
-    let productCreated = false;
+    // Already for sale under this name (ignoring capitals and spacing) or barcode?
+    const sameName = products.find((product) => productNameKey(product.name) === productNameKey(name));
+    if (sameName) {
+      setNotice(`“${sameName.name}” is already in your products. To change it, use its ⋮ Actions menu in Inventory.`);
+      return;
+    }
+    const sameBarcode = barcode ? products.find((product) => product.barcode === barcode) : undefined;
+    if (sameBarcode) {
+      setNotice(`The barcode ${barcode} is already used by “${sameBarcode.name}”.`);
+      return;
+    }
+    const values: NewProductValues = { name, category: selectedCategory, costPrice, wholesalePrice, price, stock, imageIcon: selectedProductIcon, image: selectedProductImage, barcode };
+
+    // A removed product with this name: offer to bring it back (its past sales
+    // stay with it) instead of adding a second product with the same name.
     try {
-      const supabase = createClient();
+      const pattern = name.replace(/[\\%_]/g, (character) => `\\${character}`);
+      const { data: removedMatches } = await createClient().from("products").select("id, name").eq("active", false).ilike("name", pattern).order("updated_at", { ascending: false }).limit(1);
+      const removed = (removedMatches ?? [])[0] as { id: string; name: string } | undefined;
+      if (removed) {
+        setConfirmAction({
+          title: `Restore “${removed.name}”?`,
+          message: "A product with this name was removed earlier. Restore it with the details you entered, so its past sales stay together, or add a separate new product.",
+          confirmLabel: "Restore it",
+          tone: "neutral",
+          onConfirm: () => saveNewProduct(values, removed.id),
+          secondaryLabel: "Add as new",
+          onSecondary: () => saveNewProduct(values, null),
+        });
+        return;
+      }
+    } catch (error) {
+      setNotice(productSaveError(error, "Unable to add product."));
+      return;
+    }
+    try {
+      await saveNewProduct(values, null);
+    } catch (error) {
+      setNotice(productSaveError(error, "Unable to add product."));
+    }
+  }
+
+  // Adds the product, or restores a removed one (restoreId) with these details.
+  async function saveNewProduct(values: NewProductValues, restoreId: string | null) {
+    let uploadedPath: string | null = null;
+    let productSaved = false;
+    const supabase = createClient();
+    try {
       let imageUrl: string | null = null;
-      if (selectedProductImage) {
+      if (values.image) {
         const extensionByType: Record<string, string> = {
           "image/jpeg": "jpg",
           "image/png": "png",
           "image/webp": "webp",
         };
-        uploadedPath = `${crypto.randomUUID()}.${extensionByType[selectedProductImage.type]}`;
+        uploadedPath = `${crypto.randomUUID()}.${extensionByType[values.image.type]}`;
         const { error: uploadError } = await supabase.storage
           .from("product-images")
-          .upload(uploadedPath, selectedProductImage, {
-            contentType: selectedProductImage.type,
+          .upload(uploadedPath, values.image, {
+            contentType: values.image.type,
             cacheControl: "3600",
             upsert: false,
           });
         if (uploadError) throw new Error(`Unable to upload product image: ${uploadError.message}`);
         imageUrl = supabase.storage.from("product-images").getPublicUrl(uploadedPath).data.publicUrl;
       }
-      const { error } = await supabase.from("products").insert({
-        name,
-        category: selectedCategory,
-        cost_price: costPrice,
+      const fields = {
+        name: values.name,
+        category: values.category,
+        cost_price: values.costPrice,
         cost_price_known: true,
-        wholesale_price: wholesalePrice,
-        price,
-        stock,
-        image_icon: selectedProductIcon,
-        image_url: imageUrl,
-        barcode,
-      });
+        wholesale_price: values.wholesalePrice,
+        price: values.price,
+        stock: values.stock,
+        image_icon: values.imageIcon,
+        barcode: values.barcode,
+      };
+      const { error } = restoreId
+        // A restored product keeps its old picture unless a new one was chosen.
+        ? await supabase.from("products").update({ ...fields, ...(imageUrl ? { image_url: imageUrl } : {}), active: true, updated_at: new Date().toISOString() }).eq("id", restoreId)
+        : await supabase.from("products").insert({ ...fields, image_url: imageUrl });
       if (error) throw error;
-      productCreated = true;
+      productSaved = true;
       setShowAddProduct(false);
       setSelectedProductIcon("auto");
       setSelectedProductImage(null);
-      setNotice(`${name} added to inventory.`);
+      setNotice(restoreId ? `${values.name} restored to inventory with the details you entered.` : `${values.name} added to inventory.`);
       try {
         await refreshWorkspace();
       } catch (error) {
-        setNotice(`${name} was added, but the catalog could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
+        setNotice(`${values.name} was saved, but the catalog could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
       }
-    } catch (error) {
-      if (uploadedPath && !productCreated) {
-        const supabase = createClient();
+    } finally {
+      if (uploadedPath && !productSaved) {
         const { error: cleanupError } = await supabase.storage.from("product-images").remove([uploadedPath]);
         if (cleanupError) console.error("Unable to remove an unused product image:", cleanupError.message);
       }
-      setNotice(productSaveError(error, "Unable to add product."));
     }
   }
 
@@ -2117,11 +2180,11 @@ export default function Home() {
     }
   }
 
-  async function runConfirmAction() {
+  async function runConfirmAction(secondary = false) {
     if (!confirmAction) return;
     setIsLoading(true);
     try {
-      await confirmAction.onConfirm();
+      await (secondary && confirmAction.onSecondary ? confirmAction.onSecondary : confirmAction.onConfirm)();
       setConfirmAction(null);
     } catch (error) {
       setNotice(productSaveError(error, "That action couldn’t be completed."));
@@ -2495,72 +2558,51 @@ export default function Home() {
 
   // Step 1 of an import: read and check the file for the preview. Category
   // spellings are matched to existing ones (and to earlier rows in the file).
+  // Each row is matched the way the database will save it: same barcode, else
+  // same name ignoring capitals, else a removed product to restore.
   async function prepareImport(file: File): Promise<ImportPreview> {
     const { products: rows, errors } = validateImportedProducts(await readProductFile(file));
+    // Removed products (to show which rows restore one). Skipped offline, and
+    // given up on after a few seconds, so the preview never waits on it.
+    type RemovedProduct = { id: string; name: string; barcode: string | null };
+    let removedProducts: RemovedProduct[] = [];
+    if (!offlineSession && navigator.onLine) {
+      const lookup = createClient().from("products").select("id, name, barcode").eq("active", false).order("updated_at", { ascending: false })
+        .then(({ data }) => (data ?? []) as RemovedProduct[], () => []);
+      removedProducts = await Promise.race([lookup, new Promise<RemovedProduct[]>((resolve) => window.setTimeout(() => resolve([]), 8000))]);
+    }
     const knownCategories = [...productCategories];
     const newCategories: string[] = [];
-    const existingNames = new Set(products.map((product) => product.name));
+    const matched = new Set<string>();
     const prepared = rows.map((row) => {
       const productCategory = normalizeCategory(row.category, knownCategories);
       if (!knownCategories.includes(productCategory)) {
         knownCategories.push(productCategory);
         newCategories.push(productCategory);
       }
-      return { ...row, category: productCategory, isUpdate: existingNames.has(row.name) };
+      const key = productNameKey(row.name);
+      const active = (row.barcode ? products.find((product) => product.barcode === row.barcode) : undefined)
+        ?? products.find((product) => productNameKey(product.name) === key);
+      const removed = active ? undefined : removedProducts.find((product) => productNameKey(product.name) === key)
+        ?? (row.barcode ? removedProducts.find((product) => product.barcode === row.barcode) : undefined);
+      const match = active ?? removed;
+      if (match) matched.add(match.id);
+      return {
+        ...row,
+        category: productCategory,
+        status: active ? "update" as const : removed ? "restore" as const : "new" as const,
+        isUpdate: !!match,
+        ...(match && productNameKey(match.name) !== key ? { renamedFrom: match.name } : {}),
+      };
     });
-    const fileNames = new Set(rows.map((row) => row.name));
-    const removable = products.filter((product) => !fileNames.has(product.name)).map((product) => product.name).sort((a, b) => a.localeCompare(b));
+    const removable = products.filter((product) => !matched.has(product.id)).map((product) => product.name).sort((a, b) => a.localeCompare(b));
     return { fileName: file.name, products: prepared, errors, newCategories, removable };
   }
 
-  // Step 2: save. Rows are upserted by product name. Rows are grouped by which
-  // optional columns they include: a bulk upsert fills columns missing from a
-  // row with NULL, which would fail or overwrite a value already set.
+  // Step 2: save, in one database transaction (all rows or none). A master
+  // list also removes products for sale that no row matched; removed
+  // products are hidden, not deleted, so past orders keep them.
   async function importProducts(preview: ImportPreview, masterList = false) {
-    if (masterList) return importMasterList(preview);
-    setIsImporting(true);
-    try {
-      const groups = new Map<string, ImportedProduct[]>();
-      for (const product of preview.products) {
-        const row: ImportedProduct & { active: boolean } = {
-          name: product.name,
-          category: product.category,
-          price: product.price,
-          stock: product.stock,
-          image_icon: product.image_icon,
-          active: true,
-          ...(product.cost_price !== undefined ? { cost_price: product.cost_price, cost_price_known: true } : {}),
-          ...(product.wholesale_price !== undefined ? { wholesale_price: product.wholesale_price } : {}),
-          ...(product.barcode ? { barcode: product.barcode } : {}),
-        };
-        const signature = Object.keys(row).sort().join(",");
-        groups.set(signature, [...(groups.get(signature) ?? []), row]);
-      }
-      const supabase = createClient();
-      for (const rows of groups.values()) {
-        const { error } = await supabase.from("products").upsert(rows, { onConflict: "name" });
-        if (error) throw error;
-      }
-      const count = preview.products.length;
-      setShowImport(false);
-      setNotice(`${count} product${count === 1 ? "" : "s"} imported successfully.`);
-      try {
-        await refreshWorkspace();
-      } catch (error) {
-        setNotice(`${count} products were imported, but the catalog could not refresh: ${error instanceof Error ? error.message : "Unknown error"}`);
-      }
-    } catch (error) {
-      setNotice(productSaveError(error, "Unable to import products."));
-    } finally {
-      setIsImporting(false);
-    }
-  }
-
-  // Master list: the file replaces the whole product list. Done by the
-  // database in one transaction (remove products not in the file, then add or
-  // update the rest), so a failure changes nothing. Removed products are
-  // hidden, not deleted, so past orders keep them.
-  async function importMasterList(preview: ImportPreview) {
     setIsImporting(true);
     try {
       const rows = preview.products.map((product) => ({
@@ -2573,25 +2615,30 @@ export default function Home() {
         ...(product.wholesale_price !== undefined ? { wholesale_price: product.wholesale_price } : {}),
         ...(product.barcode ? { barcode: product.barcode } : {}),
       }));
-      const { data, error } = await createClient().rpc("import_master_product_list", { p_rows: rows }).single();
+      const { data, error } = await createClient().rpc("import_products", { p_rows: rows, p_replace: masterList }).single();
       if (error) {
         if (error.code === "PGRST202" || error.code === "42883") {
-          throw new Error("Master list import needs the latest database update. Run npx supabase db push (migration 202610130001_master_product_list.sql), then retry.");
+          throw new Error("Importing needs the latest database update. Run npx supabase db push (migration 202610130004_product_name_rules.sql), then retry.");
         }
         throw error;
       }
-      const imported = data && typeof data === "object" && "imported" in data ? Number(data.imported) : preview.products.length;
-      const removed = data && typeof data === "object" && "removed" in data ? Number(data.removed) : 0;
+      const result = (data ?? {}) as { imported?: number; removed?: number; added?: number; restored?: number };
+      const imported = Number(result.imported ?? preview.products.length);
+      const details = [
+        result.added ? `${result.added} new` : "",
+        result.restored ? `${result.restored} restored` : "",
+        result.removed ? `${result.removed} not on the list removed` : "",
+      ].filter(Boolean).join(", ");
       setShowImport(false);
-      setCart({});
-      setNotice(`Master list applied successfully: ${imported} product${imported === 1 ? "" : "s"} imported${removed ? `, ${removed} not on the list removed` : ""}.`);
+      if (masterList) setCart({});
+      setNotice(`${masterList ? "Master list applied successfully" : "Import saved successfully"}: ${imported} product${imported === 1 ? "" : "s"}${details ? ` (${details})` : ""}.`);
       try {
         await refreshWorkspace();
       } catch (refreshError) {
-        setNotice(`The master list was applied, but the catalog could not refresh: ${refreshError instanceof Error ? refreshError.message : "Unknown error"}`);
+        setNotice(`The import was saved, but the catalog could not refresh: ${refreshError instanceof Error ? refreshError.message : "Unknown error"}`);
       }
     } catch (error) {
-      setNotice(productSaveError(error, "Unable to apply the master list."));
+      setNotice(productSaveError(error, masterList ? "Unable to apply the master list." : "Unable to import products."));
     } finally {
       setIsImporting(false);
     }
@@ -3158,7 +3205,7 @@ export default function Home() {
       {showRecall && <RecallDialog orders={suspendedOrders} currentHasItems={itemCount > 0} onResume={(id) => void resumeOrder(id)} onDiscard={(id) => void discardSuspendedOrder(id)} onClose={() => setShowRecall(false)} />}
       {showLayoutPanel && currentView === "pos" && <PosLayoutPanel layout={posLayout} onChange={updateLayout} onClose={() => setShowLayoutPanel(false)} swapHint={isDesktopApp() ? "F10" : undefined} />}
       {showSyncPanel && <SyncPanel sales={pendingOrders} isOnline={isOnline} isSyncing={isSyncing} currentUserId={userId} isAdmin={isAdmin} onSync={(retryFailed) => void syncPendingOrders({ retryFailed })} onClose={() => setShowSyncPanel(false)} />}
-      {confirmAction && <ConfirmDialog action={confirmAction} isWorking={isLoading} onConfirm={() => void runConfirmAction()} onCancel={() => setConfirmAction(null)} />}
+      {confirmAction && <ConfirmDialog action={confirmAction} isWorking={isLoading} onConfirm={() => void runConfirmAction()} onSecondary={() => void runConfirmAction(true)} onCancel={() => setConfirmAction(null)} />}
       {passwordEmployee && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) setPasswordEmployee(null); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="set-password-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
@@ -3416,6 +3463,10 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
             <p className="mt-2 text-xs leading-5 text-slate-500">Yes. Click Save (Ctrl+S) under the current order, add an optional note such as the customer’s name, and serve the next customer. Click Recall (Ctrl+R) to bring it back; if another order is on screen, it’s saved first so you can switch back and forth. Saved orders stay on this computer (also offline and after restarting). Stock isn’t held aside: when an order is recalled, today’s prices apply and quantities are checked against the stock left.</p>
           </details>
           <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">How are duplicate products prevented?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Two products for sale can’t share a name or a barcode. Names are compared ignoring capitals and extra spaces, so “Coke” and “coke ” count as the same; barcodes ignore spaces. Give variants their own names, e.g. “Coke 330ml” and “Coke 1.5L”. A removed product doesn’t block its name: adding it again offers to restore it with its past sales. Imports update the product with the same barcode first, then the same name, so renaming a product in your spreadsheet renames it instead of adding a second one.</p>
+          </details>
+          <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do categories work?</summary>
             <p className="mt-2 text-xs leading-5 text-slate-500">Categories come from your products. Admins create one by typing a new category name when adding or editing a product, or by including it in the category column of an import. Only categories that have products appear on Point of sale.</p>
           </details>
@@ -3614,16 +3665,18 @@ function SyncPanel({ sales, isOnline, isSyncing, currentUserId, isAdmin, onSync,
 
 // Confirmation for destructive actions. Cancel has focus first, so a stray
 // Enter never deletes anything; Esc cancels.
-function ConfirmDialog({ action, isWorking, onConfirm, onCancel }: { action: ConfirmAction; isWorking: boolean; onConfirm: () => void; onCancel: () => void }) {
+function ConfirmDialog({ action, isWorking, onConfirm, onSecondary, onCancel }: { action: ConfirmAction; isWorking: boolean; onConfirm: () => void; onSecondary: () => void; onCancel: () => void }) {
+  const neutral = action.tone === "neutral";
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isWorking) onCancel(); }}>
       <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message" className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
-        <div className="mb-4 grid h-10 w-10 place-items-center rounded-xl bg-red-50 text-red-600 dark:bg-red-950/50 dark:text-red-300"><TriangleAlert size={18} /></div>
+        <div className={`mb-4 grid h-10 w-10 place-items-center rounded-xl ${neutral ? "bg-blue-50 text-blue-600 dark:bg-blue-950/50 dark:text-blue-300" : "bg-red-50 text-red-600 dark:bg-red-950/50 dark:text-red-300"}`}>{neutral ? <RotateCcw size={18} /> : <TriangleAlert size={18} />}</div>
         <h2 id="confirm-title" className="text-lg font-semibold">{action.title}</h2>
         <p id="confirm-message" className="mt-1.5 text-sm leading-6 text-slate-500">{action.message}</p>
         <div className="mt-6 flex gap-3">
           <button type="button" autoFocus disabled={isWorking} onClick={onCancel} className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800">Cancel <Kbd>Esc</Kbd></button>
-          <button type="button" disabled={isWorking} onClick={onConfirm} className="flex h-11 flex-1 items-center justify-center rounded-lg bg-red-600 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60">{isWorking ? "Working…" : action.confirmLabel}</button>
+          {action.secondaryLabel && <button type="button" disabled={isWorking} onClick={onSecondary} className="flex h-11 flex-1 items-center justify-center rounded-lg border border-slate-200 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">{action.secondaryLabel}</button>}
+          <button type="button" disabled={isWorking} onClick={onConfirm} className={`flex h-11 flex-1 items-center justify-center rounded-lg text-sm font-semibold text-white disabled:opacity-60 ${neutral ? "bg-blue-600 hover:bg-blue-700" : "bg-red-600 hover:bg-red-700"}`}>{isWorking ? "Working…" : action.confirmLabel}</button>
         </div>
       </div>
     </div>
@@ -3766,7 +3819,8 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
     }
   }
 
-  const newCount = preview?.products.filter((product) => !product.isUpdate).length ?? 0;
+  const newCount = preview?.products.filter((product) => product.status === "new").length ?? 0;
+  const restoreCount = preview?.products.filter((product) => product.status === "restore").length ?? 0;
   const updateCount = (preview?.products.length ?? 0) - newCount;
   const needsAcknowledgement = masterList && (preview?.removable.length ?? 0) > 0;
   const canImport = !!preview && preview.products.length > 0 && preview.errors.length === 0 && !isImporting && (!needsAcknowledgement || acknowledged);
@@ -3778,7 +3832,7 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isImporting) onClose(); }}>
       <div role="dialog" aria-modal="true" aria-labelledby="import-title" className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl dark:bg-slate-900">
         <div className="flex items-start justify-between border-b border-slate-100 p-6 pb-4 dark:border-slate-800">
-          <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="import-title" className="mt-1 text-xl font-semibold">Import products</h2><p className="mt-1 text-sm text-slate-500">Excel (.xlsx), CSV, or JSON. Products are matched by name: existing names are updated, new names are added.</p></div>
+          <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="import-title" className="mt-1 text-xl font-semibold">Import products</h2><p className="mt-1 text-sm text-slate-500">Excel (.xlsx), CSV, or JSON. Each row updates the product with the same barcode, or else the same name (capitals and spaces don’t matter), restores a removed one, or is added as new.</p></div>
           <button type="button" aria-label="Close import (Esc)" disabled={isImporting} onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50 dark:hover:bg-slate-800"><X size={18} /></button>
         </div>
         <form
@@ -3849,7 +3903,7 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
               <>
                 <div className="grid grid-cols-3 gap-2 text-center">
                   <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800"><p className="text-lg font-semibold">{newCount}</p><p className="text-[11px] text-slate-500">New products</p></div>
-                  <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800"><p className="text-lg font-semibold">{updateCount}</p><p className="text-[11px] text-slate-500">Updates</p></div>
+                  <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800"><p className="text-lg font-semibold">{updateCount}</p><p className="text-[11px] text-slate-500">Updates{restoreCount > 0 && <> · {restoreCount} restored</>}</p></div>
                   <div className="rounded-xl border border-slate-100 p-3 dark:border-slate-800"><p className="text-lg font-semibold">{preview.newCategories.length}</p><p className="text-[11px] text-slate-500">New categories</p></div>
                 </div>
                 {preview.newCategories.length > 0 && <p className="text-xs text-slate-500">New categories: <span className="font-medium text-slate-700 dark:text-slate-200">{preview.newCategories.join(", ")}</span></p>}
@@ -3867,12 +3921,12 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
                         {preview.products.slice(0, 50).map((product) => (
                           <tr key={product.sourceRow}>
                             <td className="px-3 py-2 text-slate-400">{product.sourceRow}</td>
-                            <td className="px-3 py-2 font-medium">{product.name}{product.barcode && <span className="block font-mono text-[10px] font-normal text-slate-400">{product.barcode}</span>}</td>
+                            <td className="px-3 py-2 font-medium">{product.name}{product.renamedFrom && <span className="block text-[10px] font-normal text-amber-700 dark:text-amber-300">Renames “{product.renamedFrom}” (same barcode)</span>}{product.barcode && <span className="block font-mono text-[10px] font-normal text-slate-400">{product.barcode}</span>}</td>
                             <td className="px-3 py-2 text-slate-500">{product.category}</td>
                             <td className="px-3 py-2 text-right">{money(product.price)}</td>
                             <td className="px-3 py-2 text-right text-slate-500">{product.wholesale_price ? money(product.wholesale_price) : "—"}</td>
                             <td className="px-3 py-2 text-right">{product.stock}</td>
-                            <td className="px-3 py-2"><span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${product.isUpdate ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.isUpdate ? "Update" : "New"}</span></td>
+                            <td className="px-3 py-2"><span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${product.status === "new" ? "bg-emerald-50 text-emerald-700" : product.status === "restore" ? "bg-blue-50 text-blue-700" : "bg-amber-50 text-amber-700"}`}>{product.status === "new" ? "New" : product.status === "restore" ? "Restore" : "Update"}</span></td>
                           </tr>
                         ))}
                       </tbody>
