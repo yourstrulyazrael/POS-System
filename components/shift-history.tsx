@@ -214,7 +214,7 @@ export function ShiftHistoryView({ isAdmin }: { isAdmin: boolean }) {
                       <span className="mt-1 block">{shift.itemsCount} item{shift.itemsCount === 1 ? "" : "s"}</span>
                     </span>
                     <span className="w-28 text-right">
-                      <span className="block text-sm font-semibold">{money(shift.salesTotal)}</span>
+                      <span className="block font-mono text-sm font-semibold">{money(shift.salesTotal)}</span>
                       <span className="mt-1 block text-[10px] text-slate-400 sm:hidden">{shift.ordersCount} orders</span>
                     </span>
                     <ChevronDown size={16} className={`shrink-0 text-slate-400 transition ${isOpen ? "rotate-180" : ""}`} />
@@ -222,9 +222,9 @@ export function ShiftHistoryView({ isAdmin }: { isAdmin: boolean }) {
                   {isOpen && (
                     <div className="border-t border-slate-100 bg-slate-50/60 px-5 py-4 dark:border-slate-800 dark:bg-slate-800/40">
                       <div className="mb-3 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-slate-500">
-                        <span>Cash <b className="font-semibold text-slate-700 dark:text-slate-200">{money(shift.cashTotal)}</b></span>
-                        <span>E-Wallet <b className="font-semibold text-slate-700 dark:text-slate-200">{money(shift.eWalletTotal)}</b></span>
-                        <span>Card <b className="font-semibold text-slate-700 dark:text-slate-200">{money(shift.cardTotal)}</b></span>
+                        <span>Cash <b className="font-mono font-semibold text-slate-700 dark:text-slate-200">{money(shift.cashTotal)}</b></span>
+                        <span>E-Wallet <b className="font-mono font-semibold text-slate-700 dark:text-slate-200">{money(shift.eWalletTotal)}</b></span>
+                        <span>Card <b className="font-mono font-semibold text-slate-700 dark:text-slate-200">{money(shift.cardTotal)}</b></span>
                       </div>
                       <div className="overflow-x-auto rounded-xl border border-slate-100 bg-white dark:border-slate-700 dark:bg-slate-900">
                         <table className="w-full min-w-[480px] text-left text-xs">
@@ -236,7 +236,7 @@ export function ShiftHistoryView({ isAdmin }: { isAdmin: boolean }) {
                                 <td className="px-4 py-2.5 text-slate-500">{timeOf(order.createdAt)}</td>
                                 <td className="px-4 py-2.5 text-slate-500">{paymentLabel(order.paymentMethod)}</td>
                                 <td className="px-4 py-2.5 text-right">{order.items}</td>
-                                <td className="px-4 py-2.5 text-right font-semibold">{money(order.total)}</td>
+                                <td className="px-4 py-2.5 text-right font-mono font-semibold">{money(order.total)}</td>
                               </tr>
                             ))}
                           </tbody>
@@ -321,10 +321,10 @@ function CashCountsPanel({ isAdmin }: { isAdmin: boolean }) {
                   <tr key={row.id}>
                     <td className="px-5 py-3"><p className="font-medium">{opened.toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Manila" })}</p><p className="mt-0.5 text-[11px] text-slate-400">{row.closed_at ? `Closed ${timeOf(new Date(row.closed_at))} by ${row.closed_by_name || row.opened_by_name}` : `Open · ${row.opened_by_name}`}</p></td>
                     <td className="px-4 py-3 text-slate-500">{row.device_label || "—"}</td>
-                    <td className="px-4 py-3 text-right">{money(Number(row.opening_float))}</td>
-                    <td className="px-4 py-3 text-right">{expected === null ? "—" : money(expected)}{serverExpected !== null && expected !== null && Math.abs(serverExpected - expected) >= 0.01 && <span className="block text-[10px] text-amber-600" title="Computed by the database from synced cash sales and refunds">DB: {money(serverExpected)}</span>}</td>
-                    <td className="px-4 py-3 text-right">{counted === null ? "—" : money(counted)}</td>
-                    <td className={`px-4 py-3 text-right font-semibold ${difference === null ? "text-slate-400" : difference === 0 ? "text-emerald-600" : difference > 0 ? "text-amber-600" : "text-red-600"}`}>{difference === null ? "—" : difference === 0 ? "Balanced" : `${difference > 0 ? "Over" : "Short"} ${money(Math.abs(difference))}`}</td>
+                    <td className="px-4 py-3 text-right font-mono">{money(Number(row.opening_float))}</td>
+                    <td className="px-4 py-3 text-right font-mono">{expected === null ? "—" : money(expected)}{serverExpected !== null && expected !== null && Math.abs(serverExpected - expected) >= 0.01 && <span className="block text-[10px] text-amber-600" title="Computed by the database from synced cash sales and refunds">DB: {money(serverExpected)}</span>}</td>
+                    <td className="px-4 py-3 text-right font-mono">{counted === null ? "—" : money(counted)}</td>
+                    <td className={`px-4 py-3 text-right font-mono font-semibold ${difference === null ? "text-slate-400" : difference === 0 ? "text-emerald-600" : difference > 0 ? "text-amber-600" : "text-red-600"}`}>{difference === null ? "—" : difference === 0 ? "Balanced" : `${difference > 0 ? "Over" : "Short"} ${money(Math.abs(difference))}`}</td>
                     <td className="max-w-[200px] truncate px-5 py-3 text-slate-500" title={row.notes}>{row.notes || "—"}</td>
                   </tr>
                 );

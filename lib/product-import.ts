@@ -10,7 +10,7 @@ export const importColumns: { field: ImportField; header: string; required: bool
   { field: "name", header: "Product Name", required: true, note: "Unique name. A name that already exists updates that product." },
   { field: "category", header: "Category", required: true, note: "Existing or new category; new names create a category." },
   { field: "retail_price", header: "Retail Price", required: true, note: "Selling price in ₱, above 0." },
-  { field: "wholesale_price", header: "Wholesale Price", required: false, note: "₱ price in wholesale mode. Blank keeps the current value (0 for new products)." },
+  { field: "wholesale_price", header: "Wholesale Price", required: false, note: "Optional ₱ price in wholesale mode. Leave blank for products not sold wholesale (like single sachets); for an existing product, blank keeps its current value and 0 removes it." },
   { field: "cost_price", header: "Cost Price", required: false, note: "₱ cost used for profit reports. Blank keeps it unset." },
   { field: "stock", header: "Stock", required: true, note: "Whole number of units on hand." },
   { field: "barcode", header: "Barcode", required: false, note: "Optional. Keep the column formatted as Text so leading zeros stay." },
@@ -35,8 +35,15 @@ const normalizeHeader = (header: string) => header.replace(/^﻿/, "").toLowerCa
 
 // "₱1,250.00", "PHP 25", " 12 " → plain numeric text; other text is left for
 // validation to reject.
+// Accepts the ways spreadsheets show amounts: "₱1,250.00", "PHP 25", "P25".
+// Excel's Accounting format shows zero as a dash ("₱ -"), and a CSV saved
+// from Excel keeps that text, so a lone dash means 0. "N/A" or "none" means
+// blank (no value).
 function cleanNumber(value: string) {
-  return value.replace(/₱|php/gi, "").replace(/,/g, "").trim();
+  const cleaned = value.replace(/₱|php/gi, "").replace(/^p(?=\s*[\d.\-–—])/i, "").replace(/,/g, "").trim();
+  if (/^[-–—]+$/.test(cleaned)) return "0";
+  if (/^(n\/?a|none|nil)$/i.test(cleaned)) return "";
+  return cleaned;
 }
 
 // Turns a header row plus data rows into records. Rows that are completely
@@ -277,7 +284,7 @@ export function buildProductsXlsx(products: ExportProduct[]) {
       case "name": return product.name;
       case "category": return product.category;
       case "retail_price": return product.price;
-      case "wholesale_price": return product.wholesalePrice;
+      case "wholesale_price": return product.wholesalePrice > 0 ? product.wholesalePrice : null; // blank = retail only
       case "cost_price": return product.costPriceKnown ? product.costPrice : null;
       case "stock": return product.stock;
       case "barcode": return product.barcode;

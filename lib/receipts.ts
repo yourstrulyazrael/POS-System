@@ -18,7 +18,7 @@ export const defaultStoreDetails: StoreDetails = {
   receiptFooter: "Thank you for shopping with us!",
 };
 
-type Line = { name: string; quantity: number; unitPrice: number };
+type Line = { name: string; quantity: number; unitPrice: number; wholesale?: boolean };
 
 const peso = (amount: number) => `₱${amount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const escapeHtml = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -62,7 +62,7 @@ const row = (label: string, value: string, className = "") => `<tr class="${clas
 function linesTable(lines: Line[]) {
   return `<table>${lines.map((line) => `
     <tr><td colspan="2">${escapeHtml(line.name)}</td></tr>
-    <tr><td class="item-detail">${line.quantity} × ${peso(line.unitPrice)}</td><td class="amount">${peso(line.quantity * line.unitPrice)}</td></tr>`).join("")}
+    <tr><td class="item-detail">${line.quantity} × ${peso(line.unitPrice)}${line.wholesale ? " (wholesale)" : ""}</td><td class="amount">${peso(line.quantity * line.unitPrice)}</td></tr>`).join("")}
   </table>`;
 }
 
@@ -90,7 +90,7 @@ export function buildSaleReceipt(store: StoreDetails, sale: SaleReceipt, paperWi
     <div>Receipt ${escapeHtml(sale.orderNumber)}</div>
     <div>${escapeHtml(dateTime(sale.createdAt))}</div>
     <div>Cashier: ${escapeHtml(sale.cashier)}</div>
-    ${sale.wholesale ? `<div class="bold">WHOLESALE PRICING</div>` : ""}
+    ${sale.wholesale && !sale.lines.some((line) => line.wholesale) ? `<div class="bold">WHOLESALE PRICING</div>` : ""}
     ${sale.reprint ? `<div class="stamp">REPRINT</div>` : ""}
     ${sale.status === "voided" ? `<div class="stamp">VOIDED</div>` : ""}
     <div class="rule"></div>

@@ -83,7 +83,7 @@ export function OpenDrawerDialog({ onOpen, onClose, deviceLabel }: { onOpen: (op
     <Dialog label="Start shift" eyebrow="CASH DRAWER" title="Start your shift" subtitle={`Count the cash in the drawer before the first sale${deviceLabel ? ` · ${deviceLabel}` : ""}.`} onClose={onClose} busy={busy}>
       <form onSubmit={submit} noValidate className="space-y-4">
         <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Opening cash (₱)
-          <input autoFocus type="number" min="0" step="0.01" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.currentTarget.value)} placeholder="0.00" className={inputClass} />
+          <input autoFocus type="number" min="0" step="0.01" inputMode="decimal" value={amount} onChange={(event) => setAmount(event.currentTarget.value)} placeholder="0.00" className={`${inputClass} font-mono`} />
         </label>
         <p className="text-xs leading-5 text-slate-500">Cash sales and cash refunds on this computer are added up until you close the shift with a cash count. Works offline.</p>
         {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
@@ -124,11 +124,11 @@ export function CashCountDialog({ session, onConfirm, onClose, onOpenDrawer }: {
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
           {pesoDenominations.map((item, index) => (
             <label key={item.label} className="block rounded-lg border border-slate-100 p-2 text-xs font-semibold dark:border-slate-800">{item.label}
-              <input autoFocus={index === 0} type="number" min="0" step="1" inputMode="numeric" value={counts[item.label] ?? ""} onChange={(event) => { const { value } = event.currentTarget; setCounts((current) => ({ ...current, [item.label]: value })); }} placeholder="0" className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm font-normal outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950" />
+              <input autoFocus={index === 0} type="number" min="0" step="1" inputMode="numeric" value={counts[item.label] ?? ""} onChange={(event) => { const { value } = event.currentTarget; setCounts((current) => ({ ...current, [item.label]: value })); }} placeholder="0" className="mt-1 h-9 w-full font-mono rounded-md border border-slate-200 bg-white px-2 text-sm font-normal outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950" />
             </label>
           ))}
         </div>
-        <dl className="space-y-1.5 rounded-xl bg-slate-50 p-4 text-sm dark:bg-slate-800">
+        <dl className="space-y-1.5 rounded-xl bg-slate-50 p-4 text-sm dark:bg-slate-800 [&_dd]:font-mono">
           <div className="flex justify-between text-slate-500"><dt>Opening cash</dt><dd>{money(session.openingFloat)}</dd></div>
           <div className="flex justify-between text-slate-500"><dt>+ Cash sales</dt><dd>{money(session.cashSales)}</dd></div>
           <div className="flex justify-between text-slate-500"><dt>− Cash refunds</dt><dd>{money(session.cashRefunds)}</dd></div>
@@ -230,7 +230,7 @@ export function RefundDialog({ order, onConfirm, onClose }: {
               const id = line.id as string;
               return (
                 <li key={id} className="flex items-center justify-between gap-3 px-4 py-3 text-xs">
-                  <div className="min-w-0"><p className="truncate font-semibold">{line.name}</p><p className="mt-0.5 text-[11px] text-slate-400">{money(line.unitPrice)} each · {left} of {line.quantity} refundable</p></div>
+                  <div className="min-w-0"><p className="truncate font-semibold">{line.name}</p><p className="mt-0.5 text-[11px] text-slate-400"><span className="font-mono">{money(line.unitPrice)}</span> each · {left} of {line.quantity} refundable</p></div>
                   <div className="flex shrink-0 items-center gap-2">
                     <input aria-label={`Refund quantity for ${line.name}`} type="number" min="0" max={left} step="1" value={quantities[id] ?? 0} onChange={(event) => { const quantity = Math.min(left, Math.max(0, Math.floor(Number(event.currentTarget.value) || 0))); setQuantities((current) => ({ ...current, [id]: quantity })); }} className="h-9 w-16 rounded-md border border-slate-200 bg-white px-2 text-right text-sm outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950" />
                     <button type="button" onClick={() => setQuantities((current) => ({ ...current, [id]: left }))} className="font-semibold text-blue-600 hover:text-blue-700">All</button>
@@ -254,7 +254,7 @@ export function RefundDialog({ order, onConfirm, onClose }: {
           <label className="flex items-center gap-2"><input type="checkbox" checked={restock} onChange={(event) => setRestock(event.currentTarget.checked)} className="h-4 w-4 accent-blue-600" /> Put items back in stock</label>
           <label className="flex items-center gap-2"><input type="checkbox" checked={printSlip} onChange={(event) => setPrintSlip(event.currentTarget.checked)} className="h-4 w-4 accent-blue-600" /> Print a refund slip</label>
         </div>
-        <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800"><span className="text-slate-500">Refund</span><span className="text-base font-bold">{money(amount)}</span></div>
+        <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm dark:bg-slate-800"><span className="text-slate-500">Refund</span><span className="font-mono text-base font-bold">{money(amount)}</span></div>
         {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
         <Actions busy={busy} onCancel={onClose} submitLabel={`Refund ${money(amount)}`} tone="red" disabled={amount <= 0} />
       </form>

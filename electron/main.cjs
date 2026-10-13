@@ -318,9 +318,16 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  // Desktop zoom shortcuts (there is no menu bar to provide them).
+  // Desktop shortcuts there is no menu bar to provide: F11 full screen, and
+  // zoom. Other F-keys (F5, F6, F10, F12) go to the page, which uses them.
   mainWindow.webContents.on("before-input-event", (event, input) => {
-    if (input.type !== "keyDown" || !(input.control || input.meta)) return;
+    if (input.type !== "keyDown") return;
+    if (input.key === "F11" && !input.control && !input.meta && !input.alt && !input.shift) {
+      if (!input.isAutoRepeat) mainWindow.setFullScreen(!mainWindow.isFullScreen());
+      event.preventDefault();
+      return;
+    }
+    if (!(input.control || input.meta)) return;
     const contents = mainWindow.webContents;
     if (input.key === "=" || input.key === "+") contents.setZoomLevel(Math.min(contents.getZoomLevel() + 0.5, 3));
     else if (input.key === "-") contents.setZoomLevel(Math.max(contents.getZoomLevel() - 0.5, -3));

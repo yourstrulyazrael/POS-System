@@ -7,7 +7,7 @@
 //   stats) and signed-in profiles, so the POS can open and sell offline.
 
 export type PendingOrderItem =
-  | { kind: "product"; productId: string; name: string; quantity: number; unitPrice: number }
+  | { kind: "product"; productId: string; name: string; quantity: number; unitPrice: number; wholesale?: boolean }
   | { kind: "custom"; description: string; quantity: number; unitPrice: number };
 
 export type PendingOrder = {

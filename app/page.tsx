@@ -56,7 +56,7 @@ import {
 import { AUTH_STORAGE_KEY, callPosAdmin, createClient } from "@/lib/supabase/client";
 import { deletePendingOrder, isNetworkError, listPendingOrders, readCache, savePendingOrder, storedSessionUserId, writeCache, type PendingOrder } from "@/lib/offline-store";
 import { buildCashCountReport, buildRefundReceipt, buildSaleReceipt, defaultStoreDetails, type StoreDetails } from "@/lib/receipts";
-import { checkForUpdates, defaultHardwareSettings, installUpdate, loadHardwareSettings, openCashDrawer, printDocument, saveHardwareSettings, supportsLiveUpdates, watchUpdateStatus, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
+import { checkForUpdates, defaultHardwareSettings, installUpdate, isDesktopApp, loadHardwareSettings, openCashDrawer, printDocument, saveHardwareSettings, supportsLiveUpdates, watchUpdateStatus, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
 import { rememberOfflineCredential, verifyOfflineCredential } from "@/lib/offline-auth";
 import { closeSession, expectedCash, openSession, readCurrentSession, readSessionOutbox, recordInSession, removeFromSessionOutbox, type CashSession } from "@/lib/cash-session";
 import { ThemeSwitcher } from "@/components/theme-switcher";
@@ -90,7 +90,7 @@ type Product = {
   emoji: string;
   color: string;
 };
-type OrderLine = { id?: string; name: string; quantity: number; unitPrice: number; custom: boolean; refundedQuantity: number };
+type OrderLine = { id?: string; name: string; quantity: number; unitPrice: number; custom: boolean; refundedQuantity: number; wholesale?: boolean };
 type Order = { id: string; fullId: string; items: number; total: number; time: string; createdAt: Date; lines: OrderLine[]; paymentMethod: PaymentMethod; paymentReferenceLast4: string | null; cashReceived: number | null; changeDue: number | null; employeeName: string; isWholesale: boolean; syncStatus?: "pending" | "failed"; syncError?: string | null; status: "completed" | "voided"; refundedTotal: number; voidReason: string | null };
 type SalesChartPoint = { label: string; cash: number; eWallet: number; card: number };
 type ProfitReportPoint = {
@@ -116,7 +116,7 @@ type OrderRow = {
   id: string;
   total: number;
   created_at: string;
-  order_items: { id: string; quantity: number; product_name: string; unit_price: number | string; product_id: string | null; refund_items: { quantity: number }[] }[];
+  order_items: { id: string; quantity: number; product_name: string; unit_price: number | string; product_id: string | null; is_wholesale?: boolean; refund_items: { quantity: number }[] }[];
   status: "completed" | "voided";
   refunded_total: number | string;
   void_reason: string | null;
@@ -129,6 +129,14 @@ type OrderRow = {
   employee_id?: string | null;
   is_wholesale: boolean;
 };
+// One cart line: a product at retail or at wholesale price.
+type CartLine = { key: string; product: Product; wholesale: boolean; quantity: number };
+const WHOLESALE_SUFFIX = "::wholesale";
+const cartKey = (productId: string, wholesale: boolean) => (wholesale ? `${productId}${WHOLESALE_SUFFIX}` : productId);
+const parseCartKey = (key: string) =>
+  key.endsWith(WHOLESALE_SUFFIX)
+    ? { productId: key.slice(0, -WHOLESALE_SUFFIX.length), wholesale: true }
+    : { productId: key, wholesale: false };
 // A destructive action waiting for the user to confirm it.
 type ConfirmAction = { title: string; message: string; confirmLabel: string; onConfirm: () => Promise<void> };
 // A "Quick Add" line for something not in the product catalog.
@@ -217,6 +225,7 @@ function pendingToOrder(sale: PendingOrder): Order {
       unitPrice: item.unitPrice,
       custom: item.kind === "custom",
       refundedQuantity: 0,
+      wholesale: item.kind === "product" && !!item.wholesale,
     })),
     items: sale.items.reduce((sum, item) => sum + item.quantity, 0),
     total: sale.total,
@@ -247,7 +256,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
   const supabase = createClient();
   const [productsResult, ordersResult] = await Promise.all([
     supabase.from("products").select("id, name, category, cost_price, cost_price_known, wholesale_price, price, stock, image_icon, image_url, barcode").eq("active", true).order("name").returns<ProductRow[]>(),
-    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, status, refunded_total, void_reason, client_order_id, order_items(id, quantity, product_name, unit_price, product_id, refund_items(quantity))").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
+    supabase.from("orders").select("id, total, created_at, payment_method, payment_reference_last4, cash_received, change_due, employee_name, is_wholesale, status, refunded_total, void_reason, client_order_id, order_items(id, quantity, product_name, unit_price, product_id, is_wholesale, refund_items(quantity))").order("created_at", { ascending: false }).limit(50).returns<OrderRow[]>(),
   ]);
   // Receipt header; optional until the refunds/receipts migration is applied.
   const storeResult = await supabase.from("store_settings").select("store_name, address, phone, tin, receipt_footer").eq("id", 1).maybeSingle();
@@ -336,6 +345,7 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
         unitPrice: Number(item.unit_price),
         custom: item.product_id === null,
         refundedQuantity: (item.refund_items ?? []).reduce((sum, refunded) => sum + refunded.quantity, 0),
+        wholesale: item.is_wholesale ?? false,
       })),
       items: order.order_items.reduce((sum, item) => sum + item.quantity, 0),
       total: Number(order.total),
@@ -355,6 +365,13 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
     shortfalls,
     storeDetails,
   };
+}
+
+// An optional price field: blank means "none" (stored as 0, e.g. a product not
+// sold wholesale). Anything else must be a number (validated by the caller).
+function optionalPrice(value: FormDataEntryValue | null) {
+  const text = String(value ?? "").trim();
+  return text === "" ? 0 : Number(text);
 }
 
 // A POS entry is "<quantity>/<barcode or name>" or just "<barcode or name>",
@@ -439,8 +456,8 @@ function validateImportedProducts(records: RawProductRecord[]) {
     if (!category || category.length > 80) problems.push("a category (up to 80 characters)");
     if (!record.retail_price || !Number.isFinite(price) || price <= 0) problems.push("a retail price above ₱0");
     if (record.stock === undefined || record.stock === "" || !Number.isInteger(stock) || stock < 0) problems.push("a whole-number stock of 0 or more");
-    if (costText && (!Number.isFinite(costPrice) || costPrice < 0)) problems.push("a cost price of ₱0 or more (or blank)");
-    if (wholesaleText && (!Number.isFinite(wholesalePrice) || wholesalePrice < 0)) problems.push("a wholesale price of ₱0 or more (or blank)");
+    if (costText && (!Number.isFinite(costPrice) || costPrice < 0)) problems.push(`a cost price of ₱0 or more, or blank (found “${costText}”)`);
+    if (wholesaleText && (!Number.isFinite(wholesalePrice) || wholesalePrice < 0)) problems.push(`a wholesale price of ₱0 or more, or blank (found “${wholesaleText}”)`);
     if (barcode === undefined) problems.push("a barcode without spaces (up to 64 characters), or blank");
     if (!productIcons.some((icon) => icon.id === imageIcon)) problems.push("a valid image icon, or blank");
     if (problems.length) {
@@ -497,6 +514,12 @@ export default function Home() {
   const [readNotifications, setReadNotifications] = useState<string[]>([]);
   const [category, setCategory] = useState("All items");
   const [customItems, setCustomItems] = useState<CustomItem[]>([]);
+  // The order line that +/−/Delete act on, highlighted and kept in view: the
+  // one last added or touched.
+  const [selectedLine, setSelectedLine] = useState<string | null>(null);
+  // Ctrl+Z takes back recent additions, newest first.
+  const additionsRef = useRef<{ key: string; custom: boolean; quantity: number }[]>([]);
+  const [lastSale, setLastSale] = useState<Order | null>(null);
   const [quickAdd, setQuickAdd] = useState<{ quantity: number; description: string; note: string } | null>(null);
   const [showImages, setShowImages] = useState(true);
   const [search, setSearch] = useState("");
@@ -551,6 +574,7 @@ export default function Home() {
   const [showLayoutPanel, setShowLayoutPanel] = useState(false);
   const headerRef = useRef<HTMLElement>(null);
   const cartWrapperRef = useRef<HTMLDivElement>(null);
+  const posGridRef = useRef<HTMLDivElement>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [showAddEmployee, setShowAddEmployee] = useState(false);
@@ -579,18 +603,28 @@ export default function Home() {
       ),
     [activeCategory, products, searchTerm],
   );
-  const cartItems = products.filter((product) => cart[product.id]);
+  // The cart holds one line per product and price tier: items added while
+  // wholesale mode is on go on that product's wholesale line, so one sale can
+  // have 24 pcs at wholesale and 1 pc at retail of the same product.
+  const productsById = useMemo(() => new Map(products.map((product) => [product.id, product])), [products]);
+  const cartLines: CartLine[] = Object.entries(cart).flatMap(([key, quantity]) => {
+    const { productId, wholesale } = parseCartKey(key);
+    const product = productsById.get(productId);
+    return product && quantity > 0 ? [{ key, product, wholesale, quantity }] : [];
+  });
+  const quantityInCart = (productId: string) => (cart[cartKey(productId, false)] ?? 0) + (cart[cartKey(productId, true)] ?? 0);
   const customTotal = customItems.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
   const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0) + customItems.reduce((sum, item) => sum + item.quantity, 0);
-  // Wholesale mode charges each product's wholesale price; products without
-  // one (₱0) stay at retail. place_order applies the same rule server-side.
+  // A wholesale line is charged the product's wholesale price; a product
+  // without one (₱0) stays at retail. place_order applies the same rule.
   // Custom items always use the price entered for them.
-  const unitPrice = (product: Product) => (wholesaleMode && product.wholesalePrice > 0 ? product.wholesalePrice : product.price);
-  const subtotal = cartItems.reduce((total, product) => total + unitPrice(product) * cart[product.id], 0) + customTotal;
+  const unitPrice = (product: Product, wholesale: boolean) => (wholesale && product.wholesalePrice > 0 ? product.wholesalePrice : product.price);
+  const subtotal = cartLines.reduce((sum, line) => sum + unitPrice(line.product, line.wholesale) * line.quantity, 0) + customTotal;
   const total = Math.round(subtotal * 100) / 100;
-  const retailTotal = Math.round((cartItems.reduce((sum, product) => sum + product.price * cart[product.id], 0) + customTotal) * 100) / 100;
+  const retailTotal = Math.round((cartLines.reduce((sum, line) => sum + line.product.price * line.quantity, 0) + customTotal) * 100) / 100;
   const wholesaleSavings = Math.round((retailTotal - total) * 100) / 100;
-  const itemsWithoutWholesalePrice = cartItems.filter((product) => product.wholesalePrice <= 0);
+  const wholesaleLines = cartLines.filter((line) => line.wholesale);
+  const itemsWithoutWholesalePrice = wholesaleLines.filter((line) => line.product.wholesalePrice <= 0).map((line) => line.product);
   const notifications = [
     ...products
       .filter((product) => product.stock <= 5)
@@ -819,7 +853,7 @@ export default function Home() {
           p_employee_id: sale.employeeId,
           p_created_at: sale.createdAt,
           p_items: sale.items.map((item) => item.kind === "product"
-            ? { product_id: item.productId, name: item.name, quantity: item.quantity, unit_price: item.unitPrice }
+            ? { product_id: item.productId, name: item.name, quantity: item.quantity, unit_price: item.unitPrice, wholesale: item.wholesale ?? false }
             : { description: item.description, quantity: item.quantity, unit_price: item.unitPrice }),
           p_payment_method: sale.paymentMethod,
           p_payment_reference_last4: sale.paymentReferenceLast4,
@@ -973,23 +1007,26 @@ export default function Home() {
     if (signedIn && role === "admin" && activePage === "analytics") void refreshProfitReport();
   }, [activePage, refreshProfitReport, role, signedIn]);
 
+  // Items go on the wholesale or retail line depending on wholesale mode at
+  // the moment they're added. Stock is checked across both lines.
   async function addToCart(product: Product) {
-    if (product.stock < (cart[product.id] ?? 0) + 1) {
-      setNotice("There isn’t enough stock for another item.");
-      return;
-    }
-    setCart((current) => ({ ...current, [product.id]: (current[product.id] ?? 0) + 1 }));
-    setNotice("");
+    addProductQuantity(product, 1, false);
   }
 
-  function addProductQuantity(product: Product, quantity: number) {
-    const available = product.stock - (cart[product.id] ?? 0);
+  function addProductQuantity(product: Product, quantity: number, announce = true) {
+    const available = product.stock - quantityInCart(product.id);
     if (quantity > available) {
       setNotice(available > 0 ? `Only ${available} more ${product.name} in stock.` : `There isn’t enough stock for another ${product.name}.`);
       return false;
     }
-    setCart((current) => ({ ...current, [product.id]: (current[product.id] ?? 0) + quantity }));
-    setNotice(`Added ${quantity} × ${product.name} to the order.`);
+    // Products without a wholesale price (e.g. single sachets) are retail-only:
+    // they go on the regular line even in wholesale mode.
+    const atWholesale = wholesaleMode && product.wholesalePrice > 0;
+    const key = cartKey(product.id, atWholesale);
+    setCart((current) => ({ ...current, [key]: (current[key] ?? 0) + quantity }));
+    rememberAddition(key, false, quantity);
+    if (wholesaleMode && !atWholesale) setNotice(`${product.name} has no wholesale price, so it was added at retail.`);
+    else setNotice(announce ? `Added ${quantity} × ${product.name}${atWholesale ? " at wholesale" : ""} to the order.` : "");
     return true;
   }
 
@@ -1004,18 +1041,55 @@ export default function Home() {
     setCart({});
     setCustomItems([]);
     setWholesaleMode(false);
+    setSelectedLine(null);
+    additionsRef.current = [];
+  }
+
+  function rememberAddition(key: string, custom: boolean, quantity: number) {
+    additionsRef.current = [...additionsRef.current.slice(-49), { key, custom, quantity }];
+    setSelectedLine(key);
+  }
+
+  // Ctrl+Z: takes back the most recent addition (as much of it as is still in
+  // the order, if it was changed since).
+  function undoLastAddition() {
+    const last = additionsRef.current.at(-1);
+    if (!last) { setNotice("Nothing to undo."); return; }
+    additionsRef.current = additionsRef.current.slice(0, -1);
+    const name = last.custom ? customItems.find((item) => item.id === last.key)?.description : productsById.get(parseCartKey(last.key).productId)?.name;
+    const inOrder = last.custom ? customItems.find((item) => item.id === last.key)?.quantity ?? 0 : cart[last.key] ?? 0;
+    const quantity = Math.min(last.quantity, inOrder);
+    if (!name || quantity <= 0) { undoLastAddition(); return; }
+    if (last.custom) changeCustomQuantity(last.key, -quantity);
+    else changeQuantity(last.key, -quantity);
+    setSelectedLine(last.key);
+    setNotice(`Undid: ${quantity} × ${name} taken off the order.`);
   }
 
   function addCustomItem(item: Omit<CustomItem, "id">) {
-    setCustomItems((current) => [...current, { ...item, id: crypto.randomUUID() }]);
+    const id = crypto.randomUUID();
+    setCustomItems((current) => [...current, { ...item, id }]);
+    rememberAddition(id, true, item.quantity);
     setQuickAdd(null);
     setNotice(`Added ${item.quantity} × ${item.description} (custom item) to the order.`);
   }
 
   function changeCustomQuantity(id: string, difference: number) {
+    setSelectedLine(id);
     setCustomItems((current) => current
       .map((item) => (item.id === id ? { ...item, quantity: Math.min(9999, item.quantity + difference) } : item))
       .filter((item) => item.quantity > 0));
+  }
+
+  // Wholesale mode applies to items added while it's on; lines already in the
+  // order keep their price. Turn it on before scanning bulk quantities.
+  function toggleWholesaleMode() {
+    setWholesaleMode((current) => {
+      setNotice(current
+        ? "Wholesale mode off: items you add now are charged retail prices."
+        : "Wholesale mode on: items you add now are charged wholesale prices.");
+      return !current;
+    });
   }
 
   function toggleImages() {
@@ -1145,7 +1219,59 @@ export default function Home() {
       if (item) { event.preventDefault(); goToPage(item.page); }
       return;
     }
+    const plainKey = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
+    // Desktop app only: browsers keep F5/F6/F10/F12 for reload, the address
+    // bar, the menu bar and developer tools. (F11, full screen, is handled by
+    // the desktop app itself.)
+    if (isDesktopApp() && plainKey && ["F5", "F6", "F10", "F12"].includes(event.key)) {
+      event.preventDefault();
+      if (event.repeat) return;
+      if (event.key === "F5") {
+        if (lastSale) void printReceipt(lastSale, true);
+        else setNotice("No sale on this computer to reprint yet. Reprint older receipts from Orders.");
+      } else if (event.key === "F6") void openDrawer(true);
+      else if (event.key === "F12") { if (cashSession) setShowCashCount(true); else setShowOpenDrawer(true); }
+      else if (activePage === "pos") updateLayout({ ...posLayout, cartSide: posLayout.cartSide === "left" ? "right" : "left" });
+      return;
+    }
     if (activePage !== "pos") return;
+    // Order line keys work when the search box is empty (or not focused), so
+    // typing and scanning are never affected.
+    const entryIdle = !inTextField || (target === searchInputRef.current && !search);
+    const lineKeys = [...cartLines.map((line) => line.key), ...customItems.map((item) => item.id)];
+    const activeLine = selectedLine && lineKeys.includes(selectedLine) ? selectedLine : lineKeys.at(-1) ?? null;
+    const changeLine = (key: string, difference: number) => {
+      if (customItems.some((item) => item.id === key)) changeCustomQuantity(key, difference);
+      else changeQuantity(key, difference);
+    };
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "z" && entryIdle) {
+      event.preventDefault();
+      undoLastAddition();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && lineKeys.length) {
+      event.preventDefault();
+      const index = activeLine ? lineKeys.indexOf(activeLine) : -1;
+      const next = event.key === "ArrowUp" ? Math.max(0, index - 1) : Math.min(lineKeys.length - 1, index + 1);
+      setSelectedLine(lineKeys[next]);
+      return;
+    }
+    if (entryIdle && !event.ctrlKey && !event.altKey && !event.metaKey && activeLine && ["+", "=", "-", "Delete"].includes(event.key)) {
+      event.preventDefault();
+      if (event.key === "Delete") {
+        const quantity = customItems.find((item) => item.id === activeLine)?.quantity ?? cart[activeLine] ?? 0;
+        const index = lineKeys.indexOf(activeLine);
+        changeLine(activeLine, -quantity);
+        setSelectedLine(lineKeys[index + 1] ?? lineKeys[index - 1] ?? null);
+      } else changeLine(activeLine, event.key === "-" ? -1 : 1);
+      return;
+    }
     if (event.key === "F2") {
       event.preventDefault();
       searchInputRef.current?.focus();
@@ -1159,6 +1285,9 @@ export default function Home() {
     } else if (event.key === "F3") {
       event.preventDefault();
       openQuickAdd();
+    } else if (event.key === "F7") {
+      event.preventDefault();
+      toggleWholesaleMode();
     } else if (event.key === "F8") {
       event.preventDefault();
       toggleImages();
@@ -1175,7 +1304,6 @@ export default function Home() {
     F1: () => choosePaymentMethod("cash"),
     F2: () => choosePaymentMethod("e_wallet"),
     F3: () => choosePaymentMethod("card"),
-    F4: () => setWholesaleMode((current) => !current),
     F7: () => setPrintThisSale((current) => !current),
   }, showCheckoutDialog && !showHelpCenter && !isLoading);
 
@@ -1213,20 +1341,22 @@ export default function Home() {
     return () => window.removeEventListener("keydown", listener);
   }, []);
 
-  function changeQuantity(productId: string, difference: number) {
-    const product = products.find((item) => item.id === productId);
-    if (difference > 0 && product && (cart[productId] ?? 0) + difference > product.stock) {
+  // Changes one cart line (a product's retail or wholesale line).
+  function changeQuantity(lineKey: string, difference: number) {
+    setSelectedLine(lineKey);
+    const product = productsById.get(parseCartKey(lineKey).productId);
+    if (difference > 0 && product && quantityInCart(product.id) + difference > product.stock) {
       setNotice(`There isn’t enough stock for another ${product.name}.`);
       return;
     }
     setCart((current) => {
-      const quantity = (current[productId] ?? 0) + difference;
+      const quantity = (current[lineKey] ?? 0) + difference;
       if (quantity <= 0) {
         const next = { ...current };
-        delete next[productId];
+        delete next[lineKey];
         return next;
       }
-      return { ...current, [productId]: quantity };
+      return { ...current, [lineKey]: quantity };
     });
   }
 
@@ -1251,13 +1381,20 @@ export default function Home() {
       employeeName: employeeName || "Team member",
       createdAt: new Date().toISOString(),
       items: [
-        ...cartItems.map((product) => ({ kind: "product" as const, productId: product.id, name: product.name, quantity: cart[product.id], unitPrice: unitPrice(product) })),
+        ...cartLines.map((line) => ({
+          kind: "product" as const,
+          productId: line.product.id,
+          name: line.product.name,
+          quantity: line.quantity,
+          unitPrice: unitPrice(line.product, line.wholesale),
+          wholesale: line.wholesale && line.product.wholesalePrice > 0,
+        })),
         ...customItems.map((item) => ({ kind: "custom" as const, description: item.description, quantity: item.quantity, unitPrice: item.unitPrice })),
       ],
       paymentMethod,
       paymentReferenceLast4: paymentMethod === "cash" ? null : paymentReferenceLast4,
       cashReceived: receivedAmount,
-      wholesale: wholesaleMode,
+      wholesale: wholesaleLines.some((line) => line.product.wholesalePrice > 0),
       total,
       cashSessionId: cashSession?.id ?? null,
       attempts: 0,
@@ -1277,14 +1414,15 @@ export default function Home() {
     try {
       const supabase = createClient();
       const { data, error } = await supabase.rpc("place_order", {
+        // Each line says whether it's wholesale; the database decides prices.
         p_items: [
-          ...cartItems.map((product) => ({ product_id: product.id, quantity: cart[product.id] })),
+          ...cartLines.map((line) => ({ product_id: line.product.id, quantity: line.quantity, wholesale: line.wholesale })),
           ...customItems.map((item) => ({ description: item.description, quantity: item.quantity, unit_price: item.unitPrice })),
         ],
         p_payment_method: paymentMethod,
         p_payment_reference_last4: sale.paymentReferenceLast4,
         p_cash_received: receivedAmount,
-        p_wholesale: wholesaleMode,
+        p_wholesale: false,
         p_client_order_id: sale.clientOrderId,
         p_cash_session_id: sale.cashSessionId,
       }).single();
@@ -1297,13 +1435,20 @@ export default function Home() {
         throw new Error("Checkout completed, but the order confirmation was invalid.");
       }
       const newOrderId = sale.clientOrderId.slice(0, 8);
-      void afterSale(sale, false, printThisSale);
-      const wasWholesale = wholesaleMode;
+      // The database sets the prices. If its total differs from the screen
+      // (a price changed since the products loaded, or the database needs
+      // updating), say so rather than letting the till be off silently.
+      const recordedTotal = "total" in data ? Number(data.total) : total;
+      const totalMismatch = Number.isFinite(recordedTotal) && Math.abs(recordedTotal - total) >= 0.01;
+      void afterSale(totalMismatch ? { ...sale, total: recordedTotal } : sale, false, printThisSale);
+      const wasWholesale = sale.wholesale;
       clearOrder();
       setShowCheckoutDialog(false);
       setCashReceived("");
       setPaymentReferenceLast4("");
-      setNotice(`${wasWholesale ? "Wholesale order" : "Order"} #${newOrderId} placed successfully.`);
+      setNotice(totalMismatch
+        ? `Order #${newOrderId} was recorded at ${money(recordedTotal)}, not the ${money(total)} shown. A price may have changed, or the database needs updating (npx supabase db push). Check the order and the change given.`
+        : `${wasWholesale ? "Order with wholesale items" : "Order"} #${newOrderId} placed successfully.`);
       try {
         await refreshWorkspace();
       } catch (error) {
@@ -1447,10 +1592,10 @@ export default function Home() {
       if (updated) setCashSession(updated);
     }
     if (sale.paymentMethod === "cash") void openDrawer();
-    if (print) {
-      const order = pendingToOrder(sale);
-      await printReceipt(savedOffline ? order : { ...order, syncStatus: undefined }, false);
-    }
+    const saved = pendingToOrder(sale);
+    const order = savedOffline ? saved : { ...saved, syncStatus: undefined };
+    setLastSale(order);
+    if (print) await printReceipt(order, false);
   }
 
   // ---------- cash drawer sessions ----------
@@ -1695,7 +1840,8 @@ export default function Home() {
     const formData = new FormData(event.currentTarget);
     const name = String(formData.get("name") ?? "").trim();
     const costPrice = Number(formData.get("cost_price"));
-    const wholesalePrice = Number(formData.get("wholesale_price"));
+    // Optional: blank means the product isn't sold wholesale (stored as 0).
+    const wholesalePrice = optionalPrice(formData.get("wholesale_price"));
     const price = Number(formData.get("price"));
     const stock = Number(formData.get("stock"));
     const selectedCategory = normalizeCategory(formData.get("category"), productCategories);
@@ -1716,7 +1862,7 @@ export default function Home() {
       return;
     }
     if (!name || !Number.isFinite(costPrice) || costPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(price) || price <= 0 || !Number.isInteger(stock) || stock < 0) {
-      setNotice("Enter a product name, valid cost and wholesale prices, a retail price above ₱0, and a valid stock quantity.");
+      setNotice("Enter a product name, a valid cost price, a wholesale price of ₱0 or more (or leave it blank), a retail price above ₱0, and a valid stock quantity.");
       return;
     }
     let uploadedPath: string | null = null;
@@ -1785,7 +1931,8 @@ export default function Home() {
         setProducts((current) => current.filter((item) => item.id !== product.id));
         setCart((current) => {
           const next = { ...current };
-          delete next[product.id];
+          delete next[cartKey(product.id, false)];
+          delete next[cartKey(product.id, true)];
           return next;
         });
         setNotice(`${product.name} removed from inventory.`);
@@ -1832,7 +1979,7 @@ export default function Home() {
     if (!editingProductPrices) return;
     const formData = new FormData(event.currentTarget);
     const costPrice = Number(formData.get("cost_price"));
-    const wholesalePrice = Number(formData.get("wholesale_price"));
+    const wholesalePrice = optionalPrice(formData.get("wholesale_price"));
     const retailPrice = Number(formData.get("price"));
     const barcode = normalizeBarcode(formData.get("barcode"));
     const productCategory = normalizeCategory(formData.get("category"), productCategories);
@@ -1841,7 +1988,7 @@ export default function Home() {
       return;
     }
     if (!Number.isFinite(costPrice) || costPrice < 0 || !Number.isFinite(wholesalePrice) || wholesalePrice < 0 || !Number.isFinite(retailPrice) || retailPrice <= 0) {
-      setNotice("Enter valid cost and wholesale prices, and a retail price above ₱0.");
+      setNotice("Enter a valid cost price, a wholesale price of ₱0 or more (or leave it blank), and a retail price above ₱0.");
       return;
     }
     if (barcode === undefined) {
@@ -2561,17 +2708,49 @@ export default function Home() {
             ) : currentView === "shifts" ? (
               <ShiftHistoryView isAdmin={isAdmin} />
             ) : (
-              <div className="grid items-start gap-5 pb-20 md:grid-cols-[minmax(0,1fr)_min(var(--cart-width),50vw)] md:pb-0 xl:gap-6" style={{ "--cart-width": `${posLayout.cartWidth}px` } as CSSProperties}>
+              <div ref={posGridRef} className="grid items-start gap-5 pb-20 md:grid-cols-[var(--pos-columns)] md:pb-0 xl:gap-6" style={{ "--pos-columns": posLayout.cartSide === "left" ? `minmax(0,${posLayout.cartShare}fr) minmax(0,${100 - posLayout.cartShare}fr)` : `minmax(0,${100 - posLayout.cartShare}fr) minmax(0,${posLayout.cartShare}fr)` } as CSSProperties}>
+                {/* Current order: on the left by default (Customize or F10 in the
+                    desktop app swaps sides), and the larger side.
+                    Phones: a drawer that slides in from the right.
+                    Tablets and up: a sticky column that fills the viewport
+                    height, so Checkout stays visible however long the order is. */}
+                {showMobileCart && <div aria-hidden="true" onClick={() => setShowMobileCart(false)} className="fixed inset-0 z-40 bg-slate-950/40 md:hidden" />}
+                <div
+                  id="cart-panel"
+                  ref={cartWrapperRef}
+                  className={`fixed inset-y-0 right-0 z-50 w-[min(440px,92vw)] transition-[transform,visibility] duration-200 md:visible md:sticky md:bottom-auto md:right-auto md:z-auto md:top-[calc(var(--pos-header-height,72px)+16px)] md:h-[calc(100dvh-var(--cart-top,88px)-16px)] md:w-auto md:translate-x-0 md:transition-none ${posLayout.cartSide === "right" ? "md:order-2" : ""} ${showMobileCart ? "visible translate-x-0" : "invisible translate-x-full"}`}
+                >
+                  <CartResizeHandle share={posLayout.cartShare} side={posLayout.cartSide} containerRef={posGridRef} onResize={(cartShare) => updateLayout({ ...posLayout, cartShare })} />
+                  <CartPanel
+                    textScale={posLayout.textScale}
+                    lines={cartLines}
+                    count={itemCount}
+                    subtotal={subtotal}
+                    total={total}
+                    onChange={changeQuantity}
+                    onCheckout={() => { setNotice(""); setShowMobileCart(false); setShowCheckoutDialog(true); }}
+                    isProcessing={isLoading}
+                    onClear={clearOrder}
+                    onOpenDrawer={() => void openDrawer(true)}
+                    desktopKeys={isDesktopApp()}
+                    selectedKey={selectedLine}
+                    onSelect={setSelectedLine}
+                    priceOf={unitPrice}
+                    hasWholesale={wholesaleLines.length > 0}
+                    wholesaleMode={wholesaleMode}
+                    onToggleWholesale={toggleWholesaleMode}
+                    savings={wholesaleSavings}
+                    onClose={() => setShowMobileCart(false)}
+                    customItems={customItems}
+                    onCustomChange={changeCustomQuantity}
+                    showImages={showImages}
+                  />
+                </div>
+
                 {/* Text size: CSS zoom scales text and controls together (many sizes are in px). */}
-                <section className="min-w-0" style={{ zoom: posLayout.textScale / 100 }}>
-                  <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-                    <div>
-                      <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> Clover &amp; Co. <span>/</span> <span className="text-blue-600">New sale</span></div>
-                      <h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">New sale</h1>
-                      <p className="mt-1 text-sm text-slate-500">Find a product and add it to the customer’s order.</p>
-                      <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-slate-400"><ScanBarcode size={13} /> Scan an item to add it. Type a quantity and slash first to add several, e.g. <code className="rounded bg-slate-100 px-1 font-mono text-slate-500 dark:bg-slate-800">24/</code> then scan.</p>
-                    </div>
-                    <div className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 focus-within:border-blue-400 sm:w-[300px]">
+                <section aria-label="Products" className="min-w-0" style={{ zoom: posLayout.textScale / 100 }}>
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <div className="flex h-10 min-w-[200px] flex-1 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 focus-within:border-blue-400 dark:border-slate-700 dark:bg-slate-900">
                       <Search size={16} className="shrink-0 text-slate-400" />
                       {entryQuantity !== null && <span className="shrink-0 rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-bold text-blue-700">×{entryQuantity}</span>}
                       <input
@@ -2595,95 +2774,84 @@ export default function Home() {
                       />
                       {search ? <button type="button" aria-label="Clear search" onClick={() => setSearch("")} className="flex items-center gap-1 text-slate-400"><Kbd>Esc</Kbd><X size={14} /></button> : <Kbd className="text-slate-400">F2</Kbd>}
                     </div>
+                    {productCategories.length > 1 && (
+                      <select value={activeCategory} onChange={(event) => setCategory(event.target.value)} aria-label="Filter by category" className="h-10 max-w-[180px] rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                        {categories.map((item) => <option key={item} value={item}>{item}</option>)}
+                      </select>
+                    )}
+                  </div>
+                  <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+                    <p className="hidden min-w-0 flex-1 items-center gap-1.5 text-[11px] text-slate-400 lg:flex"><ScanBarcode size={13} className="shrink-0" /><span className="truncate">Scan to add. Type <code className="rounded bg-slate-100 px-1 font-mono text-slate-500 dark:bg-slate-800">24/</code> first to add several.</span></p>
+                    <button type="button" aria-pressed={showLayoutPanel} onClick={() => setShowLayoutPanel((current) => !current)} className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 aria-pressed:border-blue-300 aria-pressed:text-blue-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"><LayoutGrid size={14} />Customize</button>
+                    <button type="button" role="switch" aria-checked={showImages} aria-keyshortcuts="F8" onClick={toggleImages} className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                      {showImages ? <ImageIcon size={14} /> : <ImageOff size={14} />}{showImages ? "Images on" : "Images off"}<Kbd>F8</Kbd>
+                    </button>
+                    <button type="button" aria-keyshortcuts="F3" onClick={openQuickAdd} className="flex h-8 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-300">
+                      <Plus size={14} />Quick add<Kbd>F3</Kbd>
+                    </button>
                   </div>
 
                   {!cashSession && (
-                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-100">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-xs text-blue-900 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-100">
                       <span><b className="font-semibold">Start your shift:</b> count the opening cash so the drawer can be balanced at the end of the shift.</span>
                       <button type="button" onClick={() => setShowOpenDrawer(true)} className="h-8 rounded-lg bg-blue-600 px-3 font-semibold text-white hover:bg-blue-700">Start shift</button>
                     </div>
                   )}
-                  <div className="mb-5 flex flex-wrap items-center gap-2">
-                    {productCategories.length > 1 && (
-                      <div className="flex min-w-0 flex-1 gap-2 overflow-x-auto pb-1" aria-label="Filter by category">
-                        {categories.map((item) => (
-                          <button type="button" key={item} onClick={() => setCategory(item)} aria-pressed={activeCategory === item} className={`shrink-0 rounded-full px-3.5 py-1.5 text-xs font-semibold transition ${activeCategory === item ? "bg-blue-600 text-white shadow-sm shadow-blue-600/20" : "border border-slate-200 bg-white text-slate-500 hover:border-blue-200 hover:text-blue-700"}`}>
-                            {item}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <div className="ml-auto flex shrink-0 gap-2 pb-1">
-                      <button type="button" aria-pressed={showLayoutPanel} onClick={() => setShowLayoutPanel((current) => !current)} className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 aria-pressed:border-blue-300 aria-pressed:text-blue-700"><LayoutGrid size={14} />Customize</button>
-                      <button type="button" role="switch" aria-checked={showImages} aria-keyshortcuts="F8" onClick={toggleImages} className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-[11px] font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700">
-                        {showImages ? <ImageIcon size={14} /> : <ImageOff size={14} />}{showImages ? "Images on" : "Images off"}<Kbd>F8</Kbd>
-                      </button>
-                      <button type="button" aria-keyshortcuts="F3" onClick={openQuickAdd} className="flex h-8 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 text-[11px] font-semibold text-blue-700 hover:bg-blue-100">
-                        <Plus size={14} />Quick add<Kbd>F3</Kbd>
-                      </button>
-                    </div>
-                  </div>
 
-                  {visibleProducts.length > 0 ? (
+                  {visibleProducts.length === 0 ? (
+                    <div className="grid min-h-64 place-items-center rounded-2xl border border-dashed border-slate-200 bg-white text-center dark:border-slate-700 dark:bg-slate-900">
+                      <div><ShoppingBag size={28} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No products found</p><p className="mt-1 text-xs text-slate-400">Try another name or category, or sell it as a custom item.</p><button type="button" onClick={openQuickAdd} className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"><Plus size={14} /> Quick add custom item <Kbd>F3</Kbd></button></div>
+                    </div>
+                  ) : posLayout.productView === "list" ? (
+                    <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-[0_2px_10px_rgba(20,45,90,0.025)] dark:border-slate-800 dark:bg-slate-900">
+                      <div aria-hidden="true" className={`${productRowGrid} border-b border-slate-100 bg-slate-50/80 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:border-slate-800 dark:bg-slate-800/60`}>
+                        <span className="hidden xl:block">Barcode</span><span>Product</span><span className="hidden text-right lg:block">Stock</span><span className="text-right">Price</span>
+                      </div>
+                      <div className="divide-y divide-slate-100 dark:divide-slate-800" onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
+                        {visibleProducts.map((product) => {
+                          const left = product.stock - quantityInCart(product.id);
+                          const showWholesale = wholesaleMode && product.wholesalePrice > 0;
+                          return (
+                            <button type="button" key={product.id} data-product-card disabled={left <= 0} onClick={() => addToCart(product)} className={`${productRowGrid} w-full items-center px-4 text-left outline-none transition hover:bg-blue-50/60 focus-visible:bg-blue-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-300 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-slate-800/60 dark:focus-visible:bg-slate-800 ${showImages ? "py-2" : "py-2.5"}`}>
+                              <span className="hidden truncate font-mono text-[11px] text-slate-500 xl:block">{product.barcode || "—"}</span>
+                              <span className="flex min-w-0 items-center gap-2.5">
+                                {showImages && <span className="hidden shrink-0 lg:block"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /></span>}
+                                <span className="min-w-0"><span className="block truncate text-[13px] font-semibold text-slate-800 dark:text-slate-100">{product.name}</span><span className="block truncate text-[10px] font-medium uppercase tracking-wide text-slate-400">{product.category}<span className="normal-case tracking-normal lg:hidden"> · <span className="font-mono">{left}</span> left</span></span></span>
+                              </span>
+                              <span className={`hidden text-right font-mono text-xs font-semibold tabular-nums lg:block ${left <= 0 ? "text-red-500" : left < 10 ? "text-amber-600" : "text-slate-600 dark:text-slate-300"}`}>{left}</span>
+                              <span className="text-right">{showWholesale ? <><span className="block font-mono text-[13px] font-bold tabular-nums text-emerald-600">{money(product.wholesalePrice)}</span><span className="block text-[9px] font-semibold uppercase tracking-wide text-emerald-600">Wholesale</span></> : <><span className="block font-mono text-[13px] font-bold tabular-nums text-blue-700 dark:text-blue-300">{money(product.price)}</span>{wholesaleMode && <span className="block text-[9px] font-semibold uppercase tracking-wide text-slate-400">Retail only</span>}</>}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
                     <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(${posLayout.tileSize}px, 100%), 1fr))` }} onKeyDown={(event) => moveProductFocus(event, () => searchInputRef.current?.focus())}>
                       {visibleProducts.map((product) => {
-                        const unavailable = product.stock <= (cart[product.id] ?? 0);
+                        const unavailable = product.stock <= quantityInCart(product.id);
+                        const showWholesale = wholesaleMode && product.wholesalePrice > 0;
                         return (
                           <button type="button" key={product.id} data-product-card disabled={unavailable} onClick={() => addToCart(product)} className={`group relative rounded-2xl border border-slate-100 bg-white text-left shadow-[0_2px_10px_rgba(20,45,90,0.025)] transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 ${showImages ? "p-3 sm:p-4" : "px-3 py-2.5"}`}>
                             {showImages && <ProductArtwork product={product} className={`mb-3 aspect-[1.6/1] rounded-xl text-[42px] transition-transform group-hover:scale-[1.015]`} />}
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-semibold text-slate-800">{product.name}</p>
-                                <p className="mt-1 text-[11px] text-slate-400">{product.category} · {product.stock - (cart[product.id] ?? 0)} left</p>
+                                <p className="mt-1 text-[11px] text-slate-400">{product.category} · <span className="font-mono">{product.stock - quantityInCart(product.id)}</span> left</p>
                               </div>
-                              <span className="shrink-0 text-sm font-bold text-blue-700">{money(product.price)}</span>
+                              <span className="shrink-0 text-right">{showWholesale ? <><span className="block font-mono text-sm font-bold text-emerald-600">{money(product.wholesalePrice)}</span><span className="block text-[10px] font-semibold uppercase tracking-wide text-emerald-600">Wholesale</span></> : <><span className="block font-mono text-sm font-bold text-blue-700">{money(product.price)}</span>{wholesaleMode && <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Retail only</span>}</>}</span>
                             </div>
                             {showImages && <span className="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-full bg-white text-blue-600 opacity-0 shadow-sm transition group-hover:opacity-100"><Plus size={16} /></span>}
                           </button>
                         );
                       })}
                     </div>
-                  ) : (
-                    <div className="grid min-h-64 place-items-center rounded-2xl border border-dashed border-slate-200 bg-white text-center">
-                      <div><ShoppingBag size={28} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No products found</p><p className="mt-1 text-xs text-slate-400">Try another name or category, or sell it as a custom item.</p><button type="button" onClick={openQuickAdd} className="mt-4 inline-flex h-9 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"><Plus size={14} /> Quick add custom item <Kbd>F3</Kbd></button></div>
-                    </div>
                   )}
                 </section>
 
-                {/* Phones: the cart is a drawer that slides in from the right.
-                    Tablets and up: a sticky column that fills the viewport
-                    height, so Pay stays visible however long the list is. */}
-                {showMobileCart && <div aria-hidden="true" onClick={() => setShowMobileCart(false)} className="fixed inset-0 z-40 bg-slate-950/40 md:hidden" />}
-                <div
-                  id="cart-panel"
-                  ref={cartWrapperRef}
-                  className={`fixed inset-y-0 right-0 z-50 w-[min(var(--cart-width),88vw)] transition-[transform,visibility] duration-200 md:visible md:sticky md:bottom-auto md:right-auto md:z-auto md:top-[calc(var(--pos-header-height,72px)+16px)] md:h-[calc(100dvh-var(--cart-top,88px)-16px)] md:w-auto md:translate-x-0 md:transition-none ${showMobileCart ? "visible translate-x-0" : "invisible translate-x-full"}`}
-                >
-                  <CartResizeHandle width={posLayout.cartWidth} onResize={(cartWidth) => updateLayout({ ...posLayout, cartWidth })} />
-                  <CartPanel
-                    textScale={posLayout.textScale}
-                    items={cartItems}
-                    quantities={cart}
-                    count={itemCount}
-                    subtotal={subtotal}
-                    total={total}
-                    onChange={changeQuantity}
-                    onCheckout={() => { setNotice(""); setShowMobileCart(false); setShowCheckoutDialog(true); }}
-                    isProcessing={isLoading}
-                    onClear={clearOrder}
-                    priceOf={unitPrice}
-                    wholesale={wholesaleMode}
-                    savings={wholesaleSavings}
-                    onClose={() => setShowMobileCart(false)}
-                    customItems={customItems}
-                    onCustomChange={changeCustomQuantity}
-                    showImages={showImages}
-                  />
-                </div>
                 <div className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-100 bg-white/95 px-4 py-3 shadow-[0_-4px_16px_rgba(20,45,90,0.06)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/95 md:hidden">
                   <button type="button" aria-controls="cart-panel" aria-expanded={showMobileCart} onClick={() => setShowMobileCart(true)} className="flex h-12 w-full items-center gap-3 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-lg shadow-blue-600/20">
                     <span className="relative"><ShoppingCart size={19} />{itemCount > 0 && <span className="absolute -right-2 -top-2 grid min-h-4 min-w-4 place-items-center rounded-full bg-white px-1 text-[9px] font-bold text-blue-700">{itemCount > 99 ? "99+" : itemCount}</span>}</span>
-                    <span className="flex-1 text-left">{itemCount ? "View order" : "Order is empty"}{wholesaleMode && <span className="ml-2 rounded-full bg-white/20 px-2 py-0.5 text-[10px]">Wholesale</span>}</span>
+                    <span className="flex-1 text-left">{itemCount ? "View order" : "Order is empty"}{wholesaleMode && <span className="ml-2 rounded-full bg-white/20 px-2 py-0.5 text-[10px]">Wholesale mode</span>}</span>
                     <span>{money(total)}</span>
                   </button>
                 </div>
@@ -2698,7 +2866,7 @@ export default function Home() {
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/50 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) setShowCheckoutDialog(false); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="checkout-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <div className="mb-5 flex items-start justify-between">
-              <div><p className="text-xs font-semibold text-blue-600">PAYMENT</p><h2 id="checkout-title" className="mt-1 text-xl font-semibold">Complete checkout</h2><p className="mt-1 text-sm text-slate-500">{itemCount} item{itemCount === 1 ? "" : "s"} · {money(total)} due</p></div>
+              <div><p className="text-xs font-semibold text-blue-600">PAYMENT</p><h2 id="checkout-title" className="mt-1 text-xl font-semibold">Complete checkout</h2><p className="mt-1 text-sm text-slate-500">{itemCount} item{itemCount === 1 ? "" : "s"} · <span className="font-mono">{money(total)}</span> due</p></div>
               <button type="button" aria-label="Close checkout dialog" disabled={isLoading} onClick={() => setShowCheckoutDialog(false)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
             </div>
             <form noValidate onSubmit={(event) => { event.preventDefault(); if (!isLoading) void checkout(); }}>
@@ -2714,16 +2882,14 @@ export default function Home() {
                 ))}
               </div>
             </fieldset>
-            <div className={`mt-4 rounded-xl border p-3 ${wholesaleMode ? "border-emerald-200 bg-emerald-50/70 dark:border-emerald-800 dark:bg-emerald-950/50" : "border-slate-200 dark:border-slate-700"}`}>
-              <button type="button" role="switch" aria-checked={wholesaleMode} aria-keyshortcuts="F4" onClick={() => setWholesaleMode((current) => !current)} className="flex w-full items-center gap-3 text-left">
-                <span className={`relative h-5 w-9 shrink-0 rounded-full transition ${wholesaleMode ? "bg-emerald-600" : "bg-slate-300"}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${wholesaleMode ? "left-[18px]" : "left-0.5"}`} /></span>
-                <span className="flex-1"><span className="block text-sm font-semibold text-slate-700">Wholesale pricing</span><span className="block text-[11px] text-slate-500">{wholesaleMode ? `Saving ${money(wholesaleSavings)} off retail (${money(retailTotal)})` : "Charge this customer wholesale prices"}</span></span>
-                <Kbd className="text-slate-500">F4</Kbd>
-              </button>
-              {wholesaleMode && itemsWithoutWholesalePrice.length > 0 && (
-                <p className="mt-2 border-t border-emerald-200 pt-2 text-[11px] leading-4 text-amber-700">No wholesale price set — charged at retail: {itemsWithoutWholesalePrice.map((product) => product.name).join(", ")}</p>
-              )}
-            </div>
+            {/* Wholesale is chosen per item while ringing up (Wholesale mode, F7); this summarises it. */}
+            {wholesaleLines.length > 0 && (
+              <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/70 p-3 text-[11px] leading-4 dark:border-emerald-800 dark:bg-emerald-950/50">
+                <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">Wholesale prices on {wholesaleLines.reduce((sum, line) => sum + line.quantity, 0)} item{wholesaleLines.reduce((sum, line) => sum + line.quantity, 0) === 1 ? "" : "s"}</p>
+                <p className="mt-0.5 text-emerald-700 dark:text-emerald-300">{wholesaleSavings > 0 ? `Saving ${money(wholesaleSavings)} off retail (${money(retailTotal)}).` : "No savings: none of these items has a wholesale price."} Other items are charged retail.</p>
+                {itemsWithoutWholesalePrice.length > 0 && <p className="mt-2 border-t border-emerald-200 pt-2 text-amber-700 dark:border-emerald-800 dark:text-amber-300">No wholesale price set — charged at retail: {itemsWithoutWholesalePrice.map((product) => product.name).join(", ")}</p>}
+              </div>
+            )}
             <button type="button" role="switch" aria-checked={printThisSale} aria-keyshortcuts="F7" onClick={() => setPrintThisSale((current) => !current)} className={`mt-2 flex w-full items-center gap-3 rounded-xl border p-3 text-left ${printThisSale ? "border-blue-200 bg-blue-50/70 dark:border-blue-800 dark:bg-blue-950/50" : "border-slate-200 dark:border-slate-700"}`}>
               <span className={`relative h-5 w-9 shrink-0 rounded-full transition ${printThisSale ? "bg-blue-600" : "bg-slate-300"}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${printThisSale ? "left-[18px]" : "left-0.5"}`} /></span>
               <span className="flex-1"><span className="flex items-center gap-1.5 text-sm font-semibold text-slate-700"><Printer size={14} /> Print receipt</span><span className="block text-[11px] text-slate-500">{printThisSale ? "A receipt prints when the payment is confirmed" : "No receipt for this sale (reprint any time from Orders)"}</span></span>
@@ -2732,13 +2898,13 @@ export default function Home() {
             {paymentMethod === "cash" ? (
               <div className="mt-4 space-y-3 rounded-xl bg-slate-50 p-4">
                 <label className="block text-sm font-medium text-slate-700">Cash received (₱)
-                  <input autoFocus required type="number" min={total} step="0.01" inputMode="decimal" value={cashReceived} onChange={(event) => setCashReceived(event.currentTarget.value)} placeholder={total.toFixed(2)} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" />
+                  <input autoFocus required type="number" min={total} step="0.01" inputMode="decimal" value={cashReceived} onChange={(event) => setCashReceived(event.currentTarget.value)} placeholder={total.toFixed(2)} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 bg-white px-3 font-mono text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" />
                 </label>
-                <div className="flex items-center justify-between border-t border-slate-200 pt-3 text-sm"><span className="font-medium text-slate-500">Change due</span><span className="font-bold text-slate-900">{money(Math.max(0, (Number(cashReceived) || 0) - total))}</span></div>
+                <div className="flex items-center justify-between border-t border-slate-200 pt-3 text-sm"><span className="font-medium text-slate-500">Change due</span><span className="font-mono font-bold text-slate-900">{money(Math.max(0, (Number(cashReceived) || 0) - total))}</span></div>
               </div>
             ) : (
               <label className="mt-4 block text-sm font-medium text-slate-700">{paymentMethod === "e_wallet" ? "E-Wallet" : "Card"} reference · last 4 digits
-                <input autoFocus required type="text" inputMode="numeric" autoComplete="off" maxLength={4} pattern="[0-9]{4}" value={paymentReferenceLast4} onChange={(event) => setPaymentReferenceLast4(event.currentTarget.value.replace(/\D/g, "").slice(0, 4))} placeholder="1234" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm tracking-[0.2em] outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" />
+                <input autoFocus required type="text" inputMode="numeric" autoComplete="off" maxLength={4} pattern="[0-9]{4}" value={paymentReferenceLast4} onChange={(event) => setPaymentReferenceLast4(event.currentTarget.value.replace(/\D/g, "").slice(0, 4))} placeholder="1234" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 font-mono text-sm tracking-[0.2em] outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" />
               </label>
             )}
             {notice && <p role="alert" className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{notice}</p>}
@@ -2761,7 +2927,7 @@ export default function Home() {
               <label className="block text-sm font-medium text-slate-700">Product name<input required name="name" placeholder="e.g. Sardines (155 g)" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" placeholder="18.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
-                <label className="block text-sm font-medium text-slate-700">Wholesale price (₱)<input required name="wholesale_price" type="number" min="0" step="0.01" placeholder="22.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+                <label className="block text-sm font-medium text-slate-700">Wholesale price (₱) <span className="font-normal text-slate-400">optional</span><input name="wholesale_price" type="number" min="0" step="0.01" placeholder="Blank = retail only" title="Leave blank for products not sold wholesale, like single sachets" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
                 <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" placeholder="25.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
                 <label className="block text-sm font-medium text-slate-700">Stock<input required name="stock" type="number" min="0" step="1" placeholder="12" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               </div>
@@ -2788,7 +2954,7 @@ export default function Home() {
             </div>
             <form onSubmit={saveProductPrices} className="space-y-4">
               <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.costPriceKnown ? editingProductPrices.costPrice : ""} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
-              <label className="block text-sm font-medium text-slate-700">Wholesale price (₱)<input required name="wholesale_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.wholesalePrice} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
+              <label className="block text-sm font-medium text-slate-700">Wholesale price (₱) <span className="font-normal text-slate-400">optional</span><input name="wholesale_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.wholesalePrice > 0 ? editingProductPrices.wholesalePrice : ""} placeholder="Blank = retail only" title="Leave blank for products not sold wholesale, like single sachets" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" defaultValue={editingProductPrices.price} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <BarcodeField defaultValue={editingProductPrices.barcode ?? ""} />
               <CategoryField categories={productCategories} defaultValue={editingProductPrices.category} />
@@ -2815,7 +2981,7 @@ export default function Home() {
       {showCashCount && cashSession && <CashCountDialog session={cashSession} onConfirm={finishDrawerSession} onClose={() => setShowCashCount(false)} onOpenDrawer={() => void openDrawer(true)} />}
       {voidTarget && <VoidDialog order={voidTarget} onConfirm={(reason, printSlip) => voidSale(voidTarget, reason, printSlip)} onClose={() => setVoidTarget(null)} />}
       {refundTarget && <RefundDialog order={refundTarget} onConfirm={(refund) => refundSale(refundTarget, refund)} onClose={() => setRefundTarget(null)} />}
-      {showLayoutPanel && currentView === "pos" && <PosLayoutPanel layout={posLayout} onChange={updateLayout} onClose={() => setShowLayoutPanel(false)} />}
+      {showLayoutPanel && currentView === "pos" && <PosLayoutPanel layout={posLayout} onChange={updateLayout} onClose={() => setShowLayoutPanel(false)} swapHint={isDesktopApp() ? "F10" : undefined} />}
       {showSyncPanel && <SyncPanel sales={pendingOrders} isOnline={isOnline} isSyncing={isSyncing} currentUserId={userId} isAdmin={isAdmin} onSync={(retryFailed) => void syncPendingOrders({ retryFailed })} onClose={() => setShowSyncPanel(false)} />}
       {confirmAction && <ConfirmDialog action={confirmAction} isWorking={isLoading} onConfirm={() => void runConfirmAction()} onCancel={() => setConfirmAction(null)} />}
       {passwordEmployee && (
@@ -2960,7 +3126,7 @@ function AdminOverview({
         </div>
         <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
           <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Recent sales</h2><p className="mt-1 text-xs text-slate-400">Latest completed transactions</p></div><button type="button" onClick={onViewOrders} className="text-xs font-semibold text-blue-600 hover:text-blue-700">All orders <ArrowRight size={13} className="ml-1 inline" /></button></div>
-          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName} · {paymentMethodLabel(order.paymentMethod)}{order.isWholesale ? " · Wholesale" : ""}</p></div><p className="text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
+          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName} · {paymentMethodLabel(order.paymentMethod)}{order.isWholesale ? " · Wholesale" : ""}</p></div><p className="font-mono text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
         </div>
       </div>
     </section>
@@ -3051,7 +3217,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">Can I change the size of the POS screen?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Yes. On Point of sale, click Customize: make the product tiles smaller (more per row) or larger, make the current order narrower or wider, and change the text size. You can also drag the left edge of the current order. The layout is saved on this computer; Reset puts it back.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Yes. On Point of sale, click Customize: put the current order on the left or right (F10 in the desktop app), make it larger or smaller, show products as a list or as tiles, and change the text size. You can also drag the divider between the order and the products. The layout is saved on this computer; Reset puts it back.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I void a sale or give a refund?</summary>
@@ -3075,7 +3241,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I sell at wholesale prices?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">In the checkout dialog, turn on Wholesale pricing (or press F4). Each item is charged its wholesale price; items without one are charged retail and listed in the dialog. Wholesale switches off after the sale or when the order is cleared, and wholesale orders are tagged in Orders.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Turn on Wholesale mode (the switch at the top of the current order, or F7) before adding the items that get wholesale prices, then turn it off for items that don’t. One sale can mix both, even for the same product: for example 24 pieces at wholesale and 1 at retail show as two lines. Wholesale lines are tagged in the order, on the receipt and in Orders. A product without a wholesale price is charged retail.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I use a barcode scanner?</summary>
@@ -3104,10 +3270,23 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
               ["F4", "Continue to payment"],
               ["F8", "Turn product images on or off"],
               ["F1 / F2 / F3", "In checkout: Cash / E-Wallet / Card"],
-              ["F4 in checkout", "Turn wholesale pricing on or off"],
+              ["F7", "Wholesale mode on or off (applies to items added next)"],
               ["F7 in checkout", "Print a receipt for this sale, or not"],
               ["F-keys in pop-ups", "Choose a pop-up’s options (shown on each option)"],
               ["F9", "Clear the current order"],
+              ["+ / −", "One more or one less of the highlighted order line (search box empty)"],
+              ["Delete", "Remove the highlighted order line"],
+              ["Ctrl + ↑ ↓", "Highlight the previous or next order line"],
+              ["Ctrl + Z", "Undo the last item added (repeat to go further back)"],
+              ["Ctrl + F", "Focus the product search"],
+              ...(isDesktopApp() ? [
+                ["F5", "Reprint the last receipt from this computer"],
+                ["F6", "Open the cash drawer"],
+                ["F10", "Move the current order to the other side"],
+                ["F11", "Full screen on or off"],
+                ["F12", "Start the shift, or count the drawer to end it"],
+                ["Ctrl + = / − / 0", "Zoom the whole app in, out, or back to normal"],
+              ] as const : []),
               ["Esc", "Close a dialog or clear the search"],
               ["F1", "Open this help center"],
             ] as const).map(([keys, action]) => (
@@ -3507,7 +3686,7 @@ function ImportProductsDialog({ prepare, onImport, onClose, isImporting }: {
                             <td className="px-3 py-2 font-medium">{product.name}{product.barcode && <span className="block font-mono text-[10px] font-normal text-slate-400">{product.barcode}</span>}</td>
                             <td className="px-3 py-2 text-slate-500">{product.category}</td>
                             <td className="px-3 py-2 text-right">{money(product.price)}</td>
-                            <td className="px-3 py-2 text-right text-slate-500">{product.wholesale_price !== undefined ? money(product.wholesale_price) : "—"}</td>
+                            <td className="px-3 py-2 text-right text-slate-500">{product.wholesale_price ? money(product.wholesale_price) : "—"}</td>
                             <td className="px-3 py-2 text-right">{product.stock}</td>
                             <td className="px-3 py-2"><span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${product.isUpdate ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.isUpdate ? "Update" : "New"}</span></td>
                           </tr>
@@ -3585,7 +3764,7 @@ function QuickAddDialog({ initial, onAdd, onClose }: {
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Price (₱)<input autoFocus={!!initial.description} required type="number" min="0.01" step="0.01" inputMode="decimal" value={price} onChange={(event) => updateFrom({ price: event.currentTarget.value })} placeholder="each" className={inputClass} /></label>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Amount (₱)<input type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(event) => updateFrom({ amount: event.currentTarget.value })} placeholder="total" className={inputClass} /></label>
           </div>
-          <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800"><span>Adds to order</span><span className="font-semibold text-slate-800 dark:text-slate-100">{Number(quantity) || 0} × {money(Math.round(Number(price) * 100) / 100 || 0)} = {money(lineTotal || 0)}</span></div>
+          <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800"><span>Adds to order</span><span className="font-mono font-semibold text-slate-800 dark:text-slate-100">{Number(quantity) || 0} × {money(Math.round(Number(price) * 100) / 100 || 0)} = {money(lineTotal || 0)}</span></div>
           {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
           <div className="flex gap-3 pt-1">
             <button type="button" onClick={onClose} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button>
@@ -3746,49 +3925,133 @@ function ProductImagePicker({
   );
 }
 
-function CartPanel({ items, quantities, count, subtotal, total, onChange, onCheckout, onClear, isProcessing, priceOf, wholesale, savings, onClose, customItems, onCustomChange, showImages, textScale = 100 }: {
-  items: Product[];
-  quantities: Record<string, number>;
+// Product list rows: barcode (wide screens), product and category, stock
+// (its own column from lg up), price.
+const productRowGrid = "grid gap-3 grid-cols-[minmax(0,1fr)_5rem] lg:grid-cols-[minmax(0,1fr)_3.5rem_5.5rem] xl:grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)_3.5rem_5.5rem]";
+// Order table: qty, description, price (wider screens), amount, remove.
+const orderRowGrid = "grid items-center gap-3 grid-cols-[6.25rem_minmax(0,1fr)_5.5rem_1.25rem] lg:grid-cols-[6.25rem_minmax(0,1fr)_5rem_5.5rem_1.25rem]";
+
+function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClear, onOpenDrawer, desktopKeys, selectedKey, onSelect, isProcessing, priceOf, hasWholesale, savings, onClose, customItems, onCustomChange, showImages, textScale = 100, wholesaleMode, onToggleWholesale }: {
+  lines: CartLine[];
   count: number;
   subtotal: number;
   total: number;
-  onChange: (productId: string, difference: number) => void;
+  onChange: (lineKey: string, difference: number) => void;
   onCheckout: () => void;
   onClear: () => void;
+  onOpenDrawer: () => void;
+  desktopKeys: boolean;
+  selectedKey: string | null;
+  onSelect: (key: string) => void;
   isProcessing: boolean;
-  priceOf: (product: Product) => number;
-  wholesale: boolean;
+  priceOf: (product: Product, wholesale: boolean) => number;
+  hasWholesale: boolean;
   savings: number;
   onClose: () => void;
   customItems: CustomItem[];
   onCustomChange: (id: string, difference: number) => void;
   showImages: boolean;
   textScale?: number;
+  wholesaleMode: boolean;
+  onToggleWholesale: () => void;
 }) {
-  const stepButton = "grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600";
+  const stepButton = "grid h-7 w-7 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600 dark:border-slate-700";
+  const listRef = useRef<HTMLDivElement>(null);
+  const lineKeys = [...lines.map((line) => line.key), ...customItems.map((item) => item.id)];
+  // Falls back to the last line, which is also what +/−/Delete act on then.
+  const activeKey = selectedKey && lineKeys.includes(selectedKey) ? selectedKey : lineKeys.at(-1) ?? null;
+  const activeQuantity = activeKey ? lines.find((line) => line.key === activeKey)?.quantity ?? customItems.find((item) => item.id === activeKey)?.quantity ?? 0 : 0;
+  // Keep the line being worked on in view: a new item lands at the bottom of a
+  // long order, and adding more of an existing item updates its line wherever
+  // it is. Scrolls only the order list, and only as far as needed.
+  useEffect(() => {
+    const list = listRef.current;
+    const row = activeKey ? list?.querySelector<HTMLElement>(`[data-line-key="${CSS.escape(activeKey)}"]`) : null;
+    if (!list || !row) return;
+    // Instant, not smooth: rapid scans each land in view right away.
+    if (row.offsetTop < list.scrollTop) list.scrollTop = row.offsetTop;
+    else if (row.offsetTop + row.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = row.offsetTop + row.offsetHeight - list.clientHeight;
+  }, [activeKey, activeQuantity, lineKeys.length]);
+  const rowPadding = showImages ? "py-2.5" : "py-2";
+  const row = (item: { key: string; name: string; label: string; tag?: ReactNode; artwork?: ReactNode; unitPrice: number; retailPrice?: number; quantity: number; onChange: (difference: number) => void }) => (
+    <li key={item.key} data-line-key={item.key} aria-current={item.key === activeKey || undefined} onClick={() => onSelect(item.key)} className={`${orderRowGrid} border-l-[3px] px-4 transition-colors ${rowPadding} ${item.key === activeKey ? "border-l-blue-500 bg-blue-50/70 dark:bg-blue-950/40" : "border-l-transparent"}`}>
+      <span className="flex items-center gap-1.5">
+        <button type="button" aria-label={`Remove one ${item.label}`} onClick={() => item.onChange(-1)} className={stepButton}><Minus size={12} /></button>
+        <span className="min-w-6 text-center font-mono text-sm font-bold tabular-nums">{item.quantity}</span>
+        <button type="button" aria-label={`Add one ${item.label}`} onClick={() => item.onChange(1)} className={stepButton}><Plus size={12} /></button>
+      </span>
+      <span className="flex min-w-0 items-center gap-2.5">
+        {showImages && item.artwork}
+        <span className="min-w-0">
+          <span className="flex items-center gap-1.5 text-[13px] font-semibold"><span className="truncate">{item.name}</span>{item.tag}</span>
+          <span className="block text-[11px] text-slate-400 lg:hidden"><span className="font-mono">{money(item.unitPrice)}</span> each</span>
+        </span>
+      </span>
+      <span className="hidden text-right font-mono text-xs tabular-nums text-slate-600 dark:text-slate-300 lg:block">{money(item.unitPrice)}{item.retailPrice !== undefined && item.retailPrice !== item.unitPrice && <span className="block text-[10px] text-slate-400 line-through">{money(item.retailPrice)}</span>}</span>
+      <span className="text-right font-mono text-[13px] font-bold tabular-nums">{money(item.unitPrice * item.quantity)}</span>
+      <button type="button" aria-label={`Remove ${item.label} from order`} onClick={() => item.onChange(-item.quantity)} className="justify-self-end text-slate-300 hover:text-red-500"><Trash2 size={14} /></button>
+    </li>
+  );
+  const tag = (text: string, className: string) => <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${className}`}>{text}</span>;
+
   return (
     <aside aria-label="Current order" style={{ zoom: textScale / 100 }} className="flex h-full flex-col overflow-hidden border-l border-slate-100 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 md:rounded-2xl md:border md:shadow-[0_3px_16px_rgba(20,45,90,0.035)]">
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
-        <div><div className="flex items-center gap-2"><ShoppingCart size={17} className="text-blue-600" /><h2 className="text-sm font-semibold">Current order</h2></div><p className="mt-1 flex items-center gap-1.5 pl-[25px] text-[11px] text-slate-400">New sale{wholesale && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">Wholesale</span>}</p></div>
-        {count > 0 && <button type="button" onClick={onClear} aria-keyshortcuts="F9" className="ml-auto flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-red-500">Clear all <Kbd>F9</Kbd></button>}
+      <div className="flex shrink-0 items-center gap-3 border-b border-slate-100 px-4 py-3 dark:border-slate-800">
+        <ShoppingCart size={17} className="text-blue-600" />
+        <h2 className="text-sm font-semibold">Current order</h2>
+        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-800">{count} {count === 1 ? "item" : "items"}</span>
+        {hasWholesale && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Includes wholesale</span>}
+        <button type="button" role="switch" aria-checked={wholesaleMode} aria-keyshortcuts="F7" onClick={onToggleWholesale} title={wholesaleMode ? "Items you add now get wholesale prices" : "Turn on before adding bulk items"} className={`ml-auto flex h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 text-[11px] font-semibold transition ${wholesaleMode ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200" : "border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"}`}>
+          <span className={`relative h-4 w-7 shrink-0 rounded-full transition ${wholesaleMode ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"}`}><span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-all ${wholesaleMode ? "left-[14px]" : "left-0.5"}`} /></span>
+          Wholesale {wholesaleMode ? "on" : "off"}<Kbd>F7</Kbd>
+        </button>
         <button type="button" aria-label="Close order panel" onClick={onClose} className="-mr-2 rounded-lg p-2 text-slate-400 hover:bg-slate-50 md:hidden"><X size={18} /></button>
       </div>
-      <div className="flex shrink-0 items-center justify-between bg-slate-50/80 px-5 py-3 text-[11px] dark:bg-slate-800/60"><span className="text-slate-500">Customer</span><span className="font-semibold text-slate-700 dark:text-slate-200">Walk-in customer</span></div>
-      <div className="min-h-[120px] flex-1 overflow-y-auto px-5">
-        {items.length + customItems.length > 0 ? <ul className="divide-y divide-slate-100 dark:divide-slate-800">{items.map((product) => <li key={product.id} className={`flex items-center gap-3 ${showImages ? "py-4" : "py-3"}`}>
-          {showImages && <ProductArtwork product={product} className="h-11 w-11 rounded-xl text-xl" />}
-          <div className="min-w-0 flex-1"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-1 text-[11px] text-slate-400">{money(priceOf(product))} each{priceOf(product) !== product.price && <span className="ml-1.5 line-through">{money(product.price)}</span>}</p><div className="mt-2 flex items-center gap-2"><button type="button" aria-label={`Remove one ${product.name}`} onClick={() => onChange(product.id, -1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Minus size={12} /></button><span className="w-4 text-center text-xs font-semibold">{quantities[product.id]}</span><button type="button" aria-label={`Add one ${product.name}`} onClick={() => onChange(product.id, 1)} className="grid h-6 w-6 place-items-center rounded-md border border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600"><Plus size={12} /></button></div></div>
-          <div className="flex h-full flex-col items-end justify-between gap-4"><button type="button" aria-label={`Remove ${product.name} from order`} onClick={() => onChange(product.id, -quantities[product.id])} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button><span className="text-xs font-semibold">{money(priceOf(product) * quantities[product.id])}</span></div>
-        </li>)}{customItems.map((item) => <li key={item.id} className={`flex items-center gap-3 ${showImages ? "py-4" : "py-3"}`}>
-          {showImages && <div className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-slate-100 text-slate-500 dark:bg-slate-800"><PenLine size={18} /></div>}
-          <div className="min-w-0 flex-1"><p className="flex items-center gap-1.5 text-xs font-semibold"><span className="truncate">{item.description}</span><span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-800">Custom</span></p><p className="mt-1 text-[11px] text-slate-400">{money(item.unitPrice)} each</p><div className="mt-2 flex items-center gap-2"><button type="button" aria-label={`Remove one ${item.description}`} onClick={() => onCustomChange(item.id, -1)} className={stepButton}><Minus size={12} /></button><span className="min-w-4 text-center text-xs font-semibold">{item.quantity}</span><button type="button" aria-label={`Add one ${item.description}`} onClick={() => onCustomChange(item.id, 1)} className={stepButton}><Plus size={12} /></button></div></div>
-          <div className="flex h-full flex-col items-end justify-between gap-4"><button type="button" aria-label={`Remove ${item.description} from order`} onClick={() => onCustomChange(item.id, -item.quantity)} className="text-slate-300 hover:text-red-500"><Trash2 size={14} /></button><span className="text-xs font-semibold">{money(item.unitPrice * item.quantity)}</span></div>
-        </li>)}</ul> : <div className="flex min-h-[180px] flex-col items-center justify-center text-center"><div className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-500"><ShoppingCart size={20} /></div><p className="mt-3 text-xs font-semibold text-slate-700">Your order is empty</p><p className="mt-1 text-[11px] text-slate-400">Add a product to get started.</p></div>}
+      {wholesaleMode && <p className="shrink-0 border-b border-emerald-200 bg-emerald-50 px-4 py-1.5 text-[11px] text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-200">Wholesale mode: items you add now get wholesale prices.</p>}
+      <div aria-hidden="true" className={`${orderRowGrid} shrink-0 border-b border-slate-100 bg-slate-50/80 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:border-slate-800 dark:bg-slate-800/60`}>
+        <span className="pl-1">Qty</span><span>Description</span><span className="hidden text-right lg:block">Price</span><span className="text-right">Amount</span><span />
       </div>
-      <div className="shrink-0 border-t border-slate-100 px-5 py-4 dark:border-slate-800">
-        <div className="space-y-2.5 text-xs"><div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-medium text-slate-700">{money(wholesale ? subtotal + savings : subtotal)}</span></div>{wholesale && savings > 0 && <div className="flex justify-between text-emerald-700"><span>Wholesale savings</span><span className="font-medium">−{money(savings)}</span></div>}<div className="my-3 border-t border-dashed border-slate-200" /><div className="flex items-center justify-between"><span className="text-sm font-semibold">Total</span><span className="text-lg font-bold text-slate-900">{money(total)}</span></div></div>
-        <button type="button" disabled={!count || isProcessing} onClick={onCheckout} aria-keyshortcuts="F4" className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white shadow-lg shadow-blue-600/15 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"><CreditCard size={17} /> {isProcessing ? "Processing…" : `Continue to payment · ${money(total)}`}{!isProcessing && <Kbd>F4</Kbd>}</button>
-        <p className="mt-3 flex items-center justify-center gap-1.5 text-[10px] text-slate-400"><WalletCards size={13} /> Secure, fast checkout</p>
+      <div ref={listRef} className="relative min-h-[120px] flex-1 overflow-y-auto">
+        {lines.length + customItems.length > 0 ? (
+          <ul className="divide-y divide-slate-100 dark:divide-slate-800">
+            {lines.map(({ key, product, wholesale, quantity }) => row({
+              key,
+              name: product.name,
+              label: `${product.name}${wholesale ? " (wholesale)" : ""}`,
+              tag: wholesale ? tag(product.wholesalePrice > 0 ? "Wholesale" : "No wholesale price", "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300") : undefined,
+              artwork: <ProductArtwork product={product} className="h-9 w-9 shrink-0 rounded-lg text-lg" />,
+              unitPrice: priceOf(product, wholesale),
+              retailPrice: product.price,
+              quantity,
+              onChange: (difference) => onChange(key, difference),
+            }))}
+            {customItems.map((item) => row({
+              key: item.id,
+              name: item.description,
+              label: item.description,
+              tag: tag("Custom", "bg-slate-100 text-slate-500 dark:bg-slate-800"),
+              artwork: <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-500 dark:bg-slate-800"><PenLine size={16} /></span>,
+              unitPrice: item.unitPrice,
+              quantity: item.quantity,
+              onChange: (difference) => onCustomChange(item.id, difference),
+            }))}
+          </ul>
+        ) : (
+          <div className="flex h-full min-h-[180px] flex-col items-center justify-center text-center"><div className="grid h-12 w-12 place-items-center rounded-full bg-blue-50 text-blue-500 dark:bg-blue-950"><ScanBarcode size={20} /></div><p className="mt-3 text-xs font-semibold text-slate-700 dark:text-slate-200">No items yet</p><p className="mt-1 text-[11px] text-slate-400">Scan a barcode or pick a product from the list.</p></div>
+        )}
+      </div>
+      <div className="shrink-0 border-t border-slate-100 px-4 py-3 dark:border-slate-800">
+        {lineKeys.length > 0 && <p className="mb-2 hidden flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400 sm:flex"><span><Kbd>+</Kbd> <Kbd>−</Kbd> quantity</span><span><Kbd>Del</Kbd> remove</span><span><Kbd>Ctrl ↑↓</Kbd> pick line</span><span><Kbd>Ctrl Z</Kbd> undo add</span></p>}
+        <div className="space-y-1.5 text-xs">
+          <div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-mono font-medium tabular-nums text-slate-700 dark:text-slate-200">{money(hasWholesale ? subtotal + savings : subtotal)}</span></div>
+          {hasWholesale && savings > 0 && <div className="flex justify-between text-emerald-700 dark:text-emerald-400"><span>Wholesale savings</span><span className="font-mono font-medium tabular-nums">−{money(savings)}</span></div>}
+          <div className="flex items-baseline justify-between border-t border-dashed border-slate-200 pt-2 dark:border-slate-700"><span className="text-sm font-semibold">Total</span><span className="font-mono text-2xl font-bold tabular-nums text-slate-900 dark:text-white">{money(total)}</span></div>
+        </div>
+        <div className="mt-3 grid grid-cols-[1fr_1fr_2fr] gap-2">
+          <button type="button" disabled={!count} onClick={onClear} aria-keyshortcuts="F9" className="flex h-14 flex-col items-center justify-center gap-0.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-red-950/40"><span className="flex items-center gap-1.5"><Trash2 size={15} />Clear</span><Kbd>F9</Kbd></button>
+          <button type="button" onClick={onOpenDrawer} className="flex h-14 flex-col items-center justify-center gap-0.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"><span className="flex items-center gap-1.5"><Banknote size={15} />Drawer</span>{desktopKeys && <Kbd>F6</Kbd>}</button>
+          <button type="button" disabled={!count || isProcessing} onClick={onCheckout} aria-keyshortcuts="F4" className="flex h-14 items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none dark:disabled:bg-slate-800"><CreditCard size={18} /> {isProcessing ? "Processing…" : "Checkout"}{!isProcessing && <Kbd>F4</Kbd>}</button>
+        </div>
       </div>
     </aside>
   );
@@ -3847,7 +4110,7 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length} items in your catalog</p></div><span className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-500">Updated just now</span></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5">{money(product.wholesalePrice)}</td><td className="px-4 py-3.5 font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}>{product.stock} in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
+        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{products.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
                 <DropdownMenu>
                   <DropdownMenuTrigger aria-label={`Actions for ${product.name}`} title="Actions" className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-300 data-[state=open]:bg-slate-100 data-[state=open]:text-slate-700 dark:hover:bg-slate-800 dark:data-[state=open]:bg-slate-800">
                     <EllipsisVertical size={16} />
@@ -4015,7 +4278,7 @@ function OrdersView({ orders, isAdmin, userName, connected, onPrint, onVoid, onR
                       <td className="px-4 py-3.5"><p className="font-medium text-slate-700 dark:text-slate-200">{date}</p><p className="mt-0.5 text-[11px] text-slate-400">{time}</p></td>
                       <td className="px-4 py-3.5 font-medium text-slate-700 dark:text-slate-200">{order.employeeName}</td>
                       <td className="px-4 py-3.5"><p className="font-medium text-slate-700 dark:text-slate-200">{paymentMethodLabel(order.paymentMethod)}{order.isWholesale && <span className="ml-2 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Wholesale</span>}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.paymentReferenceLast4 ? `Ref •••• ${order.paymentReferenceLast4}` : order.cashReceived !== null ? `Change ${money(order.changeDue ?? 0)}` : ""}</p></td>
-                      <td className="px-4 py-3.5 text-right"><p className="text-sm font-semibold">{money(order.total)}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"}</p></td>
+                      <td className="px-4 py-3.5 text-right"><p className="font-mono text-sm font-semibold">{money(order.total)}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"}</p></td>
                       <td className="px-5 py-3.5 text-right">
                         <DropdownMenu>
                           <DropdownMenuTrigger aria-label={`Actions for order ${order.id}`} title="Actions" className="inline-grid h-8 w-8 place-items-center rounded-lg text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-300 data-[state=open]:bg-slate-100 data-[state=open]:text-slate-700 dark:hover:bg-slate-800 dark:data-[state=open]:bg-slate-800">
@@ -4071,16 +4334,16 @@ function OrderDetailsDialog({ order, onClose }: { order: Order; onClose: () => v
         <ul className="divide-y divide-slate-100 rounded-xl border border-slate-100 dark:divide-slate-800 dark:border-slate-800">
           {order.lines.map((line, index) => (
             <li key={`${line.name}-${index}`} className="flex items-start justify-between gap-3 px-4 py-3 text-xs">
-              <div className="min-w-0"><p className="flex items-center gap-1.5 font-semibold"><span className="truncate">{line.name}</span>{line.custom && <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-800">Custom</span>}</p><p className="mt-0.5 text-[11px] text-slate-400">{line.quantity} × {money(line.unitPrice)}</p></div>
-              <span className="shrink-0 font-semibold">{money(line.quantity * line.unitPrice)}</span>
+              <div className="min-w-0"><p className="flex items-center gap-1.5 font-semibold"><span className="truncate">{line.name}</span>{line.custom && <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-800">Custom</span>}{line.wholesale && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Wholesale</span>}</p><p className="mt-0.5 text-[11px] text-slate-400"><span className="font-mono">{line.quantity} × {money(line.unitPrice)}</span></p></div>
+              <span className="shrink-0 font-mono font-semibold">{money(line.quantity * line.unitPrice)}</span>
             </li>
           ))}
         </ul>
         <dl className="mt-4 space-y-2 text-xs">
           <div className="flex justify-between text-slate-500"><dt>Payment</dt><dd className="font-medium text-slate-700 dark:text-slate-200">{paymentMethodLabel(order.paymentMethod)}{order.paymentReferenceLast4 ? ` · Ref •••• ${order.paymentReferenceLast4}` : ""}{order.isWholesale ? " · Wholesale" : ""}</dd></div>
-          {order.cashReceived !== null && <div className="flex justify-between text-slate-500"><dt>Cash received</dt><dd className="font-medium text-slate-700 dark:text-slate-200">{money(order.cashReceived)}</dd></div>}
-          {order.cashReceived !== null && <div className="flex justify-between text-slate-500"><dt>Change</dt><dd className="font-medium text-slate-700 dark:text-slate-200">{money(order.changeDue ?? 0)}</dd></div>}
-          <div className="flex items-center justify-between border-t border-dashed border-slate-200 pt-3 dark:border-slate-700"><dt className="text-sm font-semibold">Total</dt><dd className="text-lg font-bold">{money(order.total)}</dd></div>
+          {order.cashReceived !== null && <div className="flex justify-between text-slate-500"><dt>Cash received</dt><dd className="font-mono font-medium text-slate-700 dark:text-slate-200">{money(order.cashReceived)}</dd></div>}
+          {order.cashReceived !== null && <div className="flex justify-between text-slate-500"><dt>Change</dt><dd className="font-mono font-medium text-slate-700 dark:text-slate-200">{money(order.changeDue ?? 0)}</dd></div>}
+          <div className="flex items-center justify-between border-t border-dashed border-slate-200 pt-3 dark:border-slate-700"><dt className="text-sm font-semibold">Total</dt><dd className="font-mono text-lg font-bold">{money(order.total)}</dd></div>
         </dl>
         <div className="mt-4 flex items-center gap-2 text-[11px] text-slate-500"><OrderStatusBadge order={order} /> {order.items} item{order.items === 1 ? "" : "s"}</div>{order.syncStatus && <p className="mt-2 text-[11px] leading-4 text-slate-500">{order.syncStatus === "failed" && order.syncError ? `The server refused this sale: ${order.syncError}` : "Saved on this computer. It syncs to the store database automatically when online."}</p>}
       </div>

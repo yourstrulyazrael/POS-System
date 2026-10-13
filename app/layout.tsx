@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Geist } from "next/font/google";
+import { Geist, Roboto_Mono } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
 
@@ -19,6 +19,15 @@ const geistSans = Geist({
   subsets: ["latin"],
 });
 
+// Figures (prices, amounts, quantities, stock, barcodes) use a monospace
+// font so columns of numbers line up: Consolas on Windows, Roboto Mono
+// elsewhere (see fontFamily.mono in tailwind.config.ts).
+const robotoMono = Roboto_Mono({
+  variable: "--font-roboto-mono",
+  display: "swap",
+  subsets: ["latin"],
+});
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -26,7 +35,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${geistSans.className} antialiased`}>
+      <body className={`${geistSans.className} ${robotoMono.variable} antialiased`}>
         <ThemeProvider
           attribute="class"
           defaultTheme="system"

@@ -1,20 +1,26 @@
-// POS screen layout chosen on each till (product tile size, current-order
-// width, text size). Saved per computer, since each till has its own screen.
+// POS screen layout chosen on each till: how much of the screen the current
+// order takes and which side it is on, list or tile view for products, tile size, and text size.
+// Saved per computer, since each till has its own screen.
+
+export type ProductView = "list" | "tiles";
+export type CartSide = "left" | "right";
 
 export type PosLayout = {
-  tileSize: number; // minimum product tile width, px
-  cartWidth: number; // current order panel width, px (tablet and up)
+  cartShare: number; // % of the width for the current order (tablet and up)
+  cartSide: CartSide; // which side the current order is on (tablet and up)
+  productView: ProductView;
+  tileSize: number; // minimum product tile width, px (tiles view)
   textScale: number; // text/control size, percent
 };
 
 export const layoutLimits = {
+  cartShare: { min: 40, max: 70, step: 1 },
   tileSize: { min: 120, max: 320, step: 10 },
-  cartWidth: { min: 260, max: 600, step: 10 },
   textScale: { min: 80, max: 140, step: 5 },
 } as const;
 
-// Matches the previous fixed layout closely.
-export const defaultPosLayout: PosLayout = { tileSize: 190, cartWidth: 340, textScale: 100 };
+// The current order is the larger side by default, like a classic POS screen.
+export const defaultPosLayout: PosLayout = { cartShare: 55, cartSide: "left", productView: "list", tileSize: 190, textScale: 100 };
 
 const STORAGE_KEY = "clover-pos-layout";
 const clamp = (value: unknown, { min, max }: { min: number; max: number }, fallback: number) => {
@@ -24,14 +30,18 @@ const clamp = (value: unknown, { min, max }: { min: number; max: number }, fallb
 
 export function normalizeLayout(layout: Partial<PosLayout>): PosLayout {
   return {
+    cartShare: clamp(layout.cartShare, layoutLimits.cartShare, defaultPosLayout.cartShare),
+    cartSide: layout.cartSide === "right" ? "right" : "left",
+    productView: layout.productView === "tiles" ? "tiles" : "list",
     tileSize: clamp(layout.tileSize, layoutLimits.tileSize, defaultPosLayout.tileSize),
-    cartWidth: clamp(layout.cartWidth, layoutLimits.cartWidth, defaultPosLayout.cartWidth),
     textScale: clamp(layout.textScale, layoutLimits.textScale, defaultPosLayout.textScale),
   };
 }
 
 export function loadPosLayout(): PosLayout {
   try {
+    // Layouts saved before the order moved to the left stored a pixel width
+    // (cartWidth); those start from the new default share instead.
     return normalizeLayout(JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}"));
   } catch {
     return defaultPosLayout;
