@@ -1,7 +1,7 @@
 {
   "name": "clover-pos",
   "productName": "Clover POS",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Point of sale for Clover & Co.",
   "author": "Clover & Co.",
   "private": true,
