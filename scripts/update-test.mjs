@@ -49,7 +49,8 @@ async function buildTestVersion() {
   const current = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).version;
   const version = option("version", nextPatch(current));
   console.log(`\nBuilding test update ${version} (installed builds are ${current}) into dist-update-test/ …\n`);
-  if (!flag("skip-web")) await run("npx", ["--no-install", "next", "build"]);
+  // Same web build as the real installer (no built-in store).
+  if (!flag("skip-web")) await run("node", ["scripts/build-desktop.mjs"]);
   await run("npx", [
     "--no-install", "electron-builder", "--win", "nsis", "--publish", "never",
     `-c.extraMetadata.version=${version}`,

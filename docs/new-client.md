@@ -68,10 +68,14 @@ https://github.com/yourstrulyazrael/POS-System-Releases (tag `vX.Y.Z`, with the
 repository is private; installed apps only read the releases repository. Keep
 database changes backward compatible: tills update at different times.
 
-## Built-in store
+## No built-in store
 
-Builds made with `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
-(and optionally `NEXT_PUBLIC_STORE_NAME`) in `.env.local` connect to that store
-by default, and each till saves it on first run. Once every existing till has
-run a version with store codes (1.1.6 or later), you can build without those
-values: new tills then always show **Connect to your store**.
+Desktop installers (`npm run dist:win` / `release:win`) are built without a
+store (scripts/build-desktop.mjs blanks the Supabase values from `.env.local`),
+so a new install always shows **Connect to your store**. Tills that ran 1.1.6 or
+later saved their store and keep using it after updating.
+
+`npm run build` / `npm run desktop` (local testing) still use `.env.local`,
+and the web version on Vercel uses Vercel's environment variables: remove
+`NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` there too if
+the web version should ask for a store code instead.
