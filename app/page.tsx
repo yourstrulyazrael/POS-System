@@ -428,8 +428,8 @@ function compactBarcode(value: string) {
 }
 
 function productSaveError(error: unknown, fallback: string) {
-  if (error && typeof error === "object" && "code" in error && error.code === "23505" && "message" in error && String(error.message).includes("products_active_name_key")) {
-    return "Another product already has that name (names are compared ignoring capitals and spaces).";
+  if (error && typeof error === "object" && "code" in error && error.code === "23505" && "message" in error && (String(error.message).includes("products_active_unbarcoded_name_key") || String(error.message).includes("products_active_name_key"))) {
+    return "Another product without a barcode already has that name. Give one of them a barcode or a different name.";
   }
   if (isNetworkError(error)) {
     return "This needs an internet connection. Sales still work offline; try this again once you’re back online.";
@@ -469,7 +469,7 @@ type ImportPreview = {
 function validateImportedProducts(records: RawProductRecord[]) {
   const products: (ImportedProduct & { sourceRow: number })[] = [];
   const errors: string[] = [];
-  const seenNames = new Map<string, number>();
+  const seenNames = new Map<string, { row: number; hasBarcode: boolean }>();
   const seenBarcodes = new Map<string, number>();
   for (const record of records) {
     const row = `Row ${record.sourceRow}`;
@@ -497,12 +497,14 @@ function validateImportedProducts(records: RawProductRecord[]) {
       errors.push(`${row} needs ${problems.join(", ")}.`);
       continue;
     }
+    // Products with barcodes may share a name (the barcode tells them apart).
     const nameKey = name.toLowerCase();
-    if (seenNames.has(nameKey)) {
-      errors.push(`${row} repeats “${name}” from row ${seenNames.get(nameKey)}. Each product name can appear once.`);
+    const earlier = seenNames.get(nameKey);
+    if (earlier && (!barcode || !earlier.hasBarcode)) {
+      errors.push(`${row} repeats “${name}” from row ${earlier.row}. Rows with the same name each need their own barcode.`);
       continue;
     }
-    seenNames.set(nameKey, record.sourceRow);
+    if (!earlier) seenNames.set(nameKey, { row: record.sourceRow, hasBarcode: !!barcode });
     if (barcode) {
       if (seenBarcodes.has(barcode)) {
         errors.push(`${row} repeats barcode ${barcode} from row ${seenBarcodes.get(barcode)}.`);
@@ -639,6 +641,13 @@ export default function Home() {
     [products],
   );
   const categories = ["All items", ...productCategories];
+  // Names shared by several products (told apart by barcode).
+  const sharedNameKeys = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const product of products) counts.set(productNameKey(product.name), (counts.get(productNameKey(product.name)) ?? 0) + 1);
+    return new Set([...counts].filter(([, count]) => count > 1).map(([key]) => key));
+  }, [products]);
+  const displayName = (product: Product) => (sharedNameKeys.has(productNameKey(product.name)) && product.barcode ? `${product.name} · …${product.barcode.slice(-4)}` : product.name);
   const activeCategory = categories.includes(category) ? category : "All items";
   const visibleProducts = useMemo(
     () =>
@@ -2040,10 +2049,14 @@ export default function Home() {
       setNotice("Enter a product name, a valid cost price, a wholesale price of ₱0 or more (or leave it blank), a retail price above ₱0, and a valid stock quantity.");
       return;
     }
-    // Already for sale under this name (ignoring capitals and spacing) or barcode?
-    const sameName = products.find((product) => productNameKey(product.name) === productNameKey(name));
+    // Already for sale under this name (ignoring capitals and spacing) or
+    // barcode? Products with barcodes may share a name; without a barcode,
+    // nothing would tell two of them apart.
+    const sameName = products.find((product) => productNameKey(product.name) === productNameKey(name) && (!barcode || !product.barcode));
     if (sameName) {
-      setNotice(`“${sameName.name}” is already in your products. To change it, use its ⋮ Actions menu in Inventory.`);
+      setNotice(barcode
+        ? `“${sameName.name}” is already in your products without a barcode. Add the barcode to it instead (its ⋮ Actions menu → Edit details), or use a different name.`
+        : `“${sameName.name}” is already in your products. To add another product with this name, give it a barcode; to change the existing one, use its ⋮ Actions menu in Inventory.`);
       return;
     }
     const sameBarcode = barcode ? products.find((product) => product.barcode === barcode) : undefined;
@@ -2581,10 +2594,18 @@ export default function Home() {
         newCategories.push(productCategory);
       }
       const key = productNameKey(row.name);
-      const active = (row.barcode ? products.find((product) => product.barcode === row.barcode) : undefined)
-        ?? products.find((product) => productNameKey(product.name) === key);
-      const removed = active ? undefined : removedProducts.find((product) => productNameKey(product.name) === key)
-        ?? (row.barcode ? removedProducts.find((product) => product.barcode === row.barcode) : undefined);
+      const sameName = products.filter((product) => productNameKey(product.name) === key);
+      if (!row.barcode && sameName.length > 1) {
+        errors.push(`Row ${row.sourceRow}: several products are named “${row.name}”. Add the barcode to say which one.`);
+      }
+      // With a barcode: that barcode, else the same name without a barcode.
+      // Without one: the only product with that name.
+      const active = row.barcode
+        ? products.find((product) => product.barcode === row.barcode) ?? sameName.find((product) => !product.barcode)
+        : sameName.length === 1 ? sameName[0] : undefined;
+      const removed = active ? undefined : row.barcode
+        ? removedProducts.find((product) => product.barcode === row.barcode) ?? removedProducts.find((product) => !product.barcode && productNameKey(product.name) === key)
+        : removedProducts.find((product) => productNameKey(product.name) === key);
       const match = active ?? removed;
       if (match) matched.add(match.id);
       return {
@@ -2938,7 +2959,7 @@ export default function Home() {
                   <CartResizeHandle share={posLayout.cartShare} side={posLayout.cartSide} containerRef={posGridRef} onResize={(cartShare) => updateLayout({ ...posLayout, cartShare })} />
                   <CartPanel
                     textScale={posLayout.textScale}
-                    lines={cartLines}
+                    lines={cartLines.map((line) => ({ ...line, product: { ...line.product, name: displayName(line.product) } }))}
                     count={itemCount}
                     subtotal={subtotal}
                     total={total}
@@ -3036,7 +3057,7 @@ export default function Home() {
                               <span className="hidden truncate font-mono text-[11px] text-slate-500 xl:block">{product.barcode || "—"}</span>
                               <span className="flex min-w-0 items-center gap-2.5">
                                 {showImages && <span className="hidden shrink-0 lg:block"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /></span>}
-                                <span className="min-w-0"><span className="block truncate text-[13px] font-semibold text-slate-800 dark:text-slate-100">{product.name}</span><span className="block truncate text-[10px] font-medium uppercase tracking-wide text-slate-400">{product.category}<span className="normal-case tracking-normal lg:hidden"> · <span className="font-mono">{left}</span> left</span></span></span>
+                                <span className="min-w-0"><span className="block truncate text-[13px] font-semibold text-slate-800 dark:text-slate-100">{displayName(product)}</span><span className="block truncate text-[10px] font-medium uppercase tracking-wide text-slate-400">{product.category}<span className="normal-case tracking-normal lg:hidden"> · <span className="font-mono">{left}</span> left</span></span></span>
                               </span>
                               <span className={`hidden text-right font-mono text-xs font-semibold tabular-nums lg:block ${left <= 0 ? "text-red-500" : left < 10 ? "text-amber-600" : "text-slate-600 dark:text-slate-300"}`}>{left}</span>
                               <span className="text-right">{showWholesale ? <><span className="block font-mono text-[13px] font-bold tabular-nums text-black dark:text-white">{money(product.wholesalePrice)}</span><span className="block text-[9px] font-semibold uppercase tracking-wide text-emerald-600">Wholesale</span></> : <><span className="block font-mono text-[13px] font-bold tabular-nums text-black dark:text-white">{money(product.price)}</span>{wholesaleMode && <span className="block text-[9px] font-semibold uppercase tracking-wide text-slate-400">Retail only</span>}</>}</span>
@@ -3055,7 +3076,7 @@ export default function Home() {
                             {showImages && <ProductArtwork product={product} className={`mb-3 aspect-[1.6/1] rounded-xl text-[42px] transition-transform group-hover:scale-[1.015]`} />}
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
-                                <p className="truncate text-sm font-semibold text-slate-800">{product.name}</p>
+                                <p className="truncate text-sm font-semibold text-slate-800">{displayName(product)}</p>
                                 <p className="mt-1 text-[11px] text-slate-400">{product.category} · <span className="font-mono">{product.stock - quantityInCart(product.id)}</span> left</p>
                               </div>
                               <span className="shrink-0 text-right">{showWholesale ? <><span className="block font-mono text-sm font-bold text-black dark:text-white">{money(product.wholesalePrice)}</span><span className="block text-[10px] font-semibold uppercase tracking-wide text-emerald-600">Wholesale</span></> : <><span className="block font-mono text-sm font-bold text-black dark:text-white">{money(product.price)}</span>{wholesaleMode && <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Retail only</span>}</>}</span>
@@ -3464,7 +3485,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How are duplicate products prevented?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Two products for sale can’t share a name or a barcode. Names are compared ignoring capitals and extra spaces, so “Coke” and “coke ” count as the same; barcodes ignore spaces. Give variants their own names, e.g. “Coke 330ml” and “Coke 1.5L”. A removed product doesn’t block its name: adding it again offers to restore it with its past sales. Imports update the product with the same barcode first, then the same name, so renaming a product in your spreadsheet renames it instead of adding a second one.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Each barcode belongs to one product. Products with barcodes may share a name, e.g. two sizes both called “Coke”; the last digits of the barcode show next to the name to tell them apart. A product without a barcode needs a name of its own (capitals and extra spaces don’t count, so “Coke” and “coke ” are the same). A removed product doesn’t block its name: adding it again offers to restore it with its past sales. Imports update the product with the same barcode first, then the same name, so renaming a product in your spreadsheet renames it instead of adding a second one; a row without a barcode must name only one product.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do categories work?</summary>
