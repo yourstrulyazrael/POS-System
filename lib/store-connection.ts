@@ -82,12 +82,18 @@ export function connectionProblem({ url, key }: { url: string; key: string }): s
 }
 
 // "CLOVER1-<base64url JSON>" — the format scripts/store-code.mjs produces.
+// The code is found anywhere in what was pasted, so copying a line or two
+// around it (the tool's "Store code for …:" line, quotes, a chat's code
+// block) still works.
 export function parseStoreCode(code: string): StoreConnection {
-  const trimmed = code.trim().replace(/\s+/g, "");
-  if (!trimmed.toUpperCase().startsWith(CODE_PREFIX)) throw new Error("That isn’t a store code. Store codes start with CLOVER1-.");
+  const found = new RegExp(`${CODE_PREFIX}[A-Za-z0-9_-]+`, "i").exec(code);
+  if (!found) {
+    if (/store:code|npm run/i.test(code)) throw new Error("That’s the command that makes a store code. Run it in the project folder, then paste the CLOVER1-… code it prints.");
+    throw new Error("That isn’t a store code. Store codes start with CLOVER1-.");
+  }
   let data: { n?: unknown; u?: unknown; k?: unknown };
   try {
-    const body = trimmed.slice(CODE_PREFIX.length).replace(/-/g, "+").replace(/_/g, "/");
+    const body = found[0].slice(CODE_PREFIX.length).replace(/-/g, "+").replace(/_/g, "/");
     data = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(body.padEnd(Math.ceil(body.length / 4) * 4, "=")), (char) => char.charCodeAt(0))));
   } catch {
     throw new Error("The store code is incomplete or mistyped. Copy it again exactly.");
