@@ -8,6 +8,7 @@ import type { CashSession } from "@/lib/cash-session";
 import { expectedCash } from "@/lib/cash-session";
 import { isDesktopApp, listPrinters, type DrawerMode, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
 import { pesoDenominations, type StoreDetails } from "@/lib/receipts";
+import { formatQuantity, lineAmount, roundQuantity } from "@/lib/quantity";
 
 type PaymentMethod = "cash" | "e_wallet" | "card";
 type RefundableOrder = {
@@ -17,7 +18,7 @@ type RefundableOrder = {
   employeeName: string;
   paymentMethod: PaymentMethod;
   refundedTotal: number;
-  lines: { id?: string; name: string; quantity: number; unitPrice: number; refundedQuantity: number }[];
+  lines: { id?: string; name: string; quantity: number; unitPrice: number; refundedQuantity: number; custom?: boolean }[];
 };
 
 const money = (amount: number) => new Intl.NumberFormat("en-PH", { style: "currency", currency: "PHP" }).format(amount);
@@ -202,7 +203,7 @@ export function RefundDialog({ order, onConfirm, onClose }: {
   const [printSlip, setPrintSlip] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const amount = refundable.reduce((sum, line) => sum + (quantities[line.id as string] ?? 0) * line.unitPrice, 0);
+  const amount = refundable.reduce((sum, line) => sum + lineAmount(line.unitPrice, quantities[line.id as string] ?? 0), 0);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -226,13 +227,13 @@ export function RefundDialog({ order, onConfirm, onClose }: {
         {refundable.length === 0 ? <p className="text-sm text-slate-500">Everything in this sale has already been refunded.</p> : (
           <ul className="divide-y divide-slate-100 rounded-xl border border-slate-100 dark:divide-slate-800 dark:border-slate-800">
             {refundable.map((line) => {
-              const left = line.quantity - line.refundedQuantity;
+              const left = roundQuantity(line.quantity - line.refundedQuantity);
               const id = line.id as string;
               return (
                 <li key={id} className="flex items-center justify-between gap-3 px-4 py-3 text-xs">
-                  <div className="min-w-0"><p className="truncate font-semibold">{line.name}</p><p className="mt-0.5 text-[11px] text-slate-400"><span className="font-mono">{money(line.unitPrice)}</span> each · {left} of {line.quantity} refundable</p></div>
+                  <div className="min-w-0"><p className="truncate font-semibold">{line.name}</p><p className="mt-0.5 text-[11px] text-slate-400"><span className="font-mono">{money(line.unitPrice)}</span> each · {formatQuantity(left)} of {formatQuantity(line.quantity)} refundable</p></div>
                   <div className="flex shrink-0 items-center gap-2">
-                    <input aria-label={`Refund quantity for ${line.name}`} type="number" min="0" max={left} step="1" value={quantities[id] ?? 0} onChange={(event) => { const quantity = Math.min(left, Math.max(0, Math.floor(Number(event.currentTarget.value) || 0))); setQuantities((current) => ({ ...current, [id]: quantity })); }} className="h-9 w-16 rounded-md border border-slate-200 bg-white px-2 text-right text-sm outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950" />
+                    <input aria-label={`Refund quantity for ${line.name}`} type="number" min="0" max={left} step={line.custom ? "0.01" : "1"} inputMode={line.custom ? "decimal" : "numeric"} value={quantities[id] ?? 0} onChange={(event) => { const entered = Math.max(0, Number(event.currentTarget.value) || 0); const quantity = Math.min(left, line.custom ? roundQuantity(entered) : Math.floor(entered)); setQuantities((current) => ({ ...current, [id]: quantity })); }} className="h-9 w-16 rounded-md border border-slate-200 bg-white px-2 text-right text-sm outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-950" />
                     <button type="button" onClick={() => setQuantities((current) => ({ ...current, [id]: left }))} className="font-semibold text-blue-600 hover:text-blue-700">All</button>
                   </div>
                 </li>

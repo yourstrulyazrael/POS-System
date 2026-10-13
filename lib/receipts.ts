@@ -2,6 +2,8 @@
 // Each builder returns a complete HTML document: no scripts, no external
 // resources (blocked by its own CSP), every value escaped.
 
+import { formatQuantity, itemCountOf, lineAmount } from "@/lib/quantity";
+
 export type StoreDetails = {
   storeName: string;
   address: string;
@@ -62,7 +64,7 @@ const row = (label: string, value: string, className = "") => `<tr class="${clas
 function linesTable(lines: Line[]) {
   return `<table>${lines.map((line) => `
     <tr><td colspan="2">${escapeHtml(line.name)}</td></tr>
-    <tr><td class="item-detail">${line.quantity} × ${peso(line.unitPrice)}${line.wholesale ? " (wholesale)" : ""}</td><td class="amount">${peso(line.quantity * line.unitPrice)}</td></tr>`).join("")}
+    <tr><td class="item-detail">${formatQuantity(line.quantity)} × ${peso(line.unitPrice)}${line.wholesale ? " (wholesale)" : ""}</td><td class="amount">${peso(lineAmount(line.unitPrice, line.quantity))}</td></tr>`).join("")}
   </table>`;
 }
 
@@ -84,7 +86,7 @@ export type SaleReceipt = {
 };
 
 export function buildSaleReceipt(store: StoreDetails, sale: SaleReceipt, paperWidth: 58 | 80) {
-  const items = sale.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const items = sale.lines.reduce((sum, line) => sum + itemCountOf(line.quantity), 0);
   const body = `${header(store)}
     <div class="rule"></div>
     <div>Receipt ${escapeHtml(sale.orderNumber)}</div>

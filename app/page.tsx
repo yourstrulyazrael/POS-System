@@ -65,6 +65,7 @@ import { SmoothLineChart } from "@/components/smooth-line-chart";
 import { ShiftHistoryView } from "@/components/shift-history";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
+import { formatQuantity, isValidCustomQuantity, itemCountOf, lineAmount, roundQuantity } from "@/lib/quantity";
 import { defaultPosLayout, loadPosLayout, normalizeLayout, savePosLayout, type PosLayout } from "@/lib/pos-layout";
 import { CartResizeHandle, PosLayoutPanel } from "@/components/pos-layout-panel";
 import { CashCountDialog, DrawerStatusButton, HardwareSettingsCard, OpenDrawerDialog, ReconnectBanner, RefundDialog, RefundIcon, StoreDetailsCard, UpdateReadyBar, UpdatesCard, VoidDialog, VoidIcon } from "@/components/pos-dialogs";
@@ -227,7 +228,7 @@ function pendingToOrder(sale: PendingOrder): Order {
       refundedQuantity: 0,
       wholesale: item.kind === "product" && !!item.wholesale,
     })),
-    items: sale.items.reduce((sum, item) => sum + item.quantity, 0),
+    items: sale.items.reduce((sum, item) => sum + itemCountOf(item.quantity), 0),
     total: sale.total,
     time: createdAt.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
     paymentMethod: sale.paymentMethod,
@@ -341,13 +342,13 @@ async function fetchWorkspaceData(includeAdminStats = false, period: SalesPeriod
       lines: order.order_items.map((item) => ({
         id: item.id,
         name: item.product_name,
-        quantity: item.quantity,
+        quantity: Number(item.quantity),
         unitPrice: Number(item.unit_price),
         custom: item.product_id === null,
-        refundedQuantity: (item.refund_items ?? []).reduce((sum, refunded) => sum + refunded.quantity, 0),
+        refundedQuantity: roundQuantity((item.refund_items ?? []).reduce((sum, refunded) => sum + Number(refunded.quantity), 0)),
         wholesale: item.is_wholesale ?? false,
       })),
-      items: order.order_items.reduce((sum, item) => sum + item.quantity, 0),
+      items: order.order_items.reduce((sum, item) => sum + itemCountOf(Number(item.quantity)), 0),
       total: Number(order.total),
       time: new Date(order.created_at).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
       paymentMethod: order.payment_method,
@@ -375,9 +376,10 @@ function optionalPrice(value: FormDataEntryValue | null) {
 }
 
 // A POS entry is "<quantity>/<barcode or name>" or just "<barcode or name>",
-// e.g. "24/4800016644290" adds 24 of that item.
+// e.g. "24/4800016644290" adds 24 of that item. A decimal quantity
+// ("0.25/sugar") is for custom items only.
 function parseSaleEntry(value: string) {
-  const match = /^\s*(\d+)\s*\/\s*(.*)$/.exec(value);
+  const match = /^\s*(\d+(?:\.\d+)?|\.\d+)\s*\/\s*(.*)$/.exec(value);
   return match ? { quantity: Number(match[1]), term: match[2].trim() } : { quantity: null, term: value.trim() };
 }
 
@@ -613,8 +615,9 @@ export default function Home() {
     return product && quantity > 0 ? [{ key, product, wholesale, quantity }] : [];
   });
   const quantityInCart = (productId: string) => (cart[cartKey(productId, false)] ?? 0) + (cart[cartKey(productId, true)] ?? 0);
-  const customTotal = customItems.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);
-  const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0) + customItems.reduce((sum, item) => sum + item.quantity, 0);
+  // Each custom line is rounded to the centavo, as the database records it.
+  const customTotal = customItems.reduce((sum, item) => sum + lineAmount(item.unitPrice, item.quantity), 0);
+  const itemCount = Object.values(cart).reduce((total, quantity) => total + quantity, 0) + customItems.reduce((sum, item) => sum + itemCountOf(item.quantity), 0);
   // A wholesale line is charged the product's wholesale price; a product
   // without one (₱0) stays at retail. place_order applies the same rule.
   // Custom items always use the price entered for them.
@@ -1063,7 +1066,7 @@ export default function Home() {
     if (last.custom) changeCustomQuantity(last.key, -quantity);
     else changeQuantity(last.key, -quantity);
     setSelectedLine(last.key);
-    setNotice(`Undid: ${quantity} × ${name} taken off the order.`);
+    setNotice(`Undid: ${formatQuantity(quantity)} × ${name} taken off the order.`);
   }
 
   function addCustomItem(item: Omit<CustomItem, "id">) {
@@ -1071,13 +1074,13 @@ export default function Home() {
     setCustomItems((current) => [...current, { ...item, id }]);
     rememberAddition(id, true, item.quantity);
     setQuickAdd(null);
-    setNotice(`Added ${item.quantity} × ${item.description} (custom item) to the order.`);
+    setNotice(`Added ${formatQuantity(item.quantity)} × ${item.description} (custom item) to the order.`);
   }
 
   function changeCustomQuantity(id: string, difference: number) {
     setSelectedLine(id);
     setCustomItems((current) => current
-      .map((item) => (item.id === id ? { ...item, quantity: Math.min(9999, item.quantity + difference) } : item))
+      .map((item) => (item.id === id ? { ...item, quantity: Math.min(9999, roundQuantity(item.quantity + difference)) } : item))
       .filter((item) => item.quantity > 0));
   }
 
@@ -1106,13 +1109,13 @@ export default function Home() {
   function submitSaleEntry() {
     const { quantity, term } = parseSaleEntry(search);
     const keepEntry = () => searchInputRef.current?.select();
-    if (quantity !== null && (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 9999)) {
-      setNotice("Enter a quantity from 1 to 9,999 before the slash, e.g. 24/4800016644290.");
+    if (quantity !== null && !isValidCustomQuantity(quantity)) {
+      setNotice("Enter a quantity from 1 to 9,999 before the slash, e.g. 24/4800016644290 (custom items can also use up to 2 decimal places, e.g. 0.25/).");
       keepEntry();
       return;
     }
     if (!term) {
-      if (quantity !== null) setNotice(`Now scan or type the item to add ${quantity} of it.`);
+      if (quantity !== null) setNotice(`Now scan or type the item to add ${formatQuantity(quantity)} of it.`);
       return;
     }
     const product = products.find((item) => item.barcode === term) ?? (visibleProducts.length === 1 ? visibleProducts[0] : undefined);
@@ -1131,6 +1134,11 @@ export default function Home() {
         note: looksLikeBarcode ? `Barcode ${term} isn’t in your products.` : `“${term}” isn’t in your products.`,
       });
       setSearch("");
+      return;
+    }
+    if (quantity !== null && !Number.isInteger(quantity)) {
+      setNotice(`${product.name} is sold in whole numbers. Decimal quantities like ${formatQuantity(quantity)} are for custom items (Quick add, F3).`);
+      keepEntry();
       return;
     }
     if (addProductQuantity(product, quantity ?? 1)) setSearch("");
@@ -1255,7 +1263,20 @@ export default function Home() {
       undoLastAddition();
       return;
     }
-    if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && lineKeys.length) {
+    // ↑/↓ move the highlighted order line (the list scrolls with it) unless
+    // the cashier is typing a search or moving between products; Ctrl+↑/↓
+    // works everywhere. PgUp/PgDn scroll the order a page at a time.
+    const onProducts = !!target?.closest("[data-product-card]");
+    const plainOrderKey = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && entryIdle && !onProducts;
+    if ((event.key === "PageUp" || event.key === "PageDown") && plainOrderKey && lineKeys.length) {
+      const list = document.querySelector<HTMLElement>("[data-order-list]");
+      if (list && list.scrollHeight > list.clientHeight) {
+        event.preventDefault();
+        list.scrollBy({ top: (event.key === "PageUp" ? -1 : 1) * Math.max(40, list.clientHeight - 48) });
+      }
+      return;
+    }
+    if ((event.key === "ArrowUp" || event.key === "ArrowDown") && (plainOrderKey || ((event.ctrlKey || event.metaKey) && !event.altKey)) && lineKeys.length) {
       event.preventDefault();
       const index = activeLine ? lineKeys.indexOf(activeLine) : -1;
       const next = event.key === "ArrowUp" ? Math.max(0, index - 1) : Math.min(lineKeys.length - 1, index + 1);
@@ -2758,7 +2779,9 @@ export default function Home() {
                         value={search}
                         onChange={(event) => setSearch(event.target.value)}
                         onKeyDown={(event) => {
-                          if (event.key === "ArrowDown") {
+                          // With a search typed, ↓ goes to the matching products; with an
+                          // empty search it moves through the order (handled globally).
+                          if (event.key === "ArrowDown" && (search || !(cartLines.length + customItems.length))) {
                             event.preventDefault();
                             document.querySelector<HTMLButtonElement>("[data-product-card]:not(:disabled)")?.focus();
                           } else if (event.key === "Enter") {
@@ -3233,7 +3256,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do I sell something that isn’t in my products?</summary>
-            <p className="mt-2 text-xs leading-5 text-slate-500">Scan or type it and press Enter — if it isn’t found, the Quick add window opens. You can also press F3 or click Quick add. Enter a description, quantity, and either the price each or the total amount. Custom items don’t change stock and have no recorded cost, so orders containing them are left out of the estimated-profit figures.</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Scan or type it and press Enter — if it isn’t found, the Quick add window opens. You can also press F3 or click Quick add. Enter a description, quantity, and either the price each or the total amount. The quantity can have up to 2 decimal places, e.g. 0.25 or 1.50 for a quarter or one and a half kilos; type 0.25/ before the name to start with it. Catalog products are sold in whole numbers. Custom items don’t change stock and have no recorded cost, so orders containing them are left out of the estimated-profit figures.</p>
           </details>
           <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do categories work?</summary>
@@ -3264,7 +3287,7 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
               ["Type or scan", "On Point of sale, starts a search or barcode entry"],
               ["24/ + scan", "Adds 24 of the scanned item (any quantity up to 9,999)"],
               ["Enter", "Add the scanned or only matching item · confirm a dialog"],
-              ["↑ ↓ ← →", "Move between products; Enter adds the focused one"],
+              ["↑ ↓ ← →", "Move between products (↓ from a search); Enter adds the focused one"],
               ["F2", "Focus the product search"],
               ["F3", "Quick add a custom item that isn’t in your products"],
               ["F4", "Continue to payment"],
@@ -3276,7 +3299,9 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
               ["F9", "Clear the current order"],
               ["+ / −", "One more or one less of the highlighted order line (search box empty)"],
               ["Delete", "Remove the highlighted order line"],
-              ["Ctrl + ↑ ↓", "Highlight the previous or next order line"],
+              ["↑ ↓", "Move up or down the order (search box empty); the list scrolls along"],
+              ["Ctrl + ↑ ↓", "Move up or down the order, even while typing a search"],
+              ["PgUp / PgDn", "Scroll the order a page at a time"],
               ["Ctrl + Z", "Undo the last item added (repeat to go further back)"],
               ["Ctrl + F", "Focus the product search"],
               ...(isDesktopApp() ? [
@@ -3726,7 +3751,7 @@ function QuickAddDialog({ initial, onAdd, onClose }: {
   function updateFrom(next: { quantity?: string; price?: string; amount?: string }) {
     const nextQuantity = next.quantity ?? quantity;
     const count = Number(nextQuantity);
-    const validCount = Number.isInteger(count) && count > 0;
+    const validCount = isValidCustomQuantity(count);
     if (next.quantity !== undefined) setQuantity(next.quantity);
     if (next.amount !== undefined) {
       setAmount(next.amount);
@@ -3743,13 +3768,13 @@ function QuickAddDialog({ initial, onAdd, onClose }: {
     const count = Number(quantity);
     const unitPrice = Math.round(Number(price) * 100) / 100;
     const name = description.trim();
-    if (!Number.isInteger(count) || count < 1 || count > 9999) return setError("Enter a whole-number quantity from 1 to 9,999.");
+    if (!isValidCustomQuantity(count)) return setError("Enter a quantity above 0 and up to 9,999, with at most 2 decimal places (e.g. 0.25 or 1.50).");
     if (!name || name.length > 120) return setError("Enter a description of up to 120 characters.");
     if (!Number.isFinite(unitPrice) || unitPrice <= 0 || unitPrice > 999999.99) return setError("Enter a price or amount above ₱0.");
-    onAdd({ description: name, quantity: count, unitPrice });
+    onAdd({ description: name, quantity: roundQuantity(count), unitPrice });
   }
 
-  const lineTotal = Math.round(Number(price) * 100) / 100 * (Number(quantity) || 0);
+  const lineTotal = lineAmount(Number(price) || 0, Number(quantity) || 0);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
       <div role="dialog" aria-modal="true" aria-labelledby="quick-add-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
@@ -3760,11 +3785,11 @@ function QuickAddDialog({ initial, onAdd, onClose }: {
         <form noValidate onSubmit={submit} className="space-y-4">
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Description<input autoFocus={!initial.description} required maxLength={120} value={description} onChange={(event) => setDescription(event.currentTarget.value)} placeholder="e.g. Ice (1 bag)" className={inputClass} /></label>
           <div className="grid grid-cols-3 gap-3">
-            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Quantity<input required type="number" min="1" max="9999" step="1" inputMode="numeric" value={quantity} onChange={(event) => updateFrom({ quantity: event.currentTarget.value })} className={inputClass} /></label>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Quantity<input required type="number" min="0.01" max="9999" step="0.01" inputMode="decimal" value={quantity} onChange={(event) => updateFrom({ quantity: event.currentTarget.value })} className={inputClass} /></label>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Price (₱)<input autoFocus={!!initial.description} required type="number" min="0.01" step="0.01" inputMode="decimal" value={price} onChange={(event) => updateFrom({ price: event.currentTarget.value })} placeholder="each" className={inputClass} /></label>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Amount (₱)<input type="number" min="0.01" step="0.01" inputMode="decimal" value={amount} onChange={(event) => updateFrom({ amount: event.currentTarget.value })} placeholder="total" className={inputClass} /></label>
           </div>
-          <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800"><span>Adds to order</span><span className="font-mono font-semibold text-slate-800 dark:text-slate-100">{Number(quantity) || 0} × {money(Math.round(Number(price) * 100) / 100 || 0)} = {money(lineTotal || 0)}</span></div>
+          <div className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-800"><span>Adds to order</span><span className="font-mono font-semibold text-slate-800 dark:text-slate-100">{formatQuantity(Number(quantity) || 0)} × {money(Math.round(Number(price) * 100) / 100 || 0)} = {money(lineTotal || 0)}</span></div>
           {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
           <div className="flex gap-3 pt-1">
             <button type="button" onClick={onClose} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button>
@@ -3977,7 +4002,7 @@ function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClea
     <li key={item.key} data-line-key={item.key} aria-current={item.key === activeKey || undefined} onClick={() => onSelect(item.key)} className={`${orderRowGrid} border-l-[3px] px-4 transition-colors ${rowPadding} ${item.key === activeKey ? "border-l-blue-500 bg-blue-50/70 dark:bg-blue-950/40" : "border-l-transparent"}`}>
       <span className="flex items-center gap-1.5">
         <button type="button" aria-label={`Remove one ${item.label}`} onClick={() => item.onChange(-1)} className={stepButton}><Minus size={12} /></button>
-        <span className="min-w-6 text-center font-mono text-sm font-bold tabular-nums">{item.quantity}</span>
+        <span className="min-w-6 text-center font-mono text-sm font-bold tabular-nums">{formatQuantity(item.quantity)}</span>
         <button type="button" aria-label={`Add one ${item.label}`} onClick={() => item.onChange(1)} className={stepButton}><Plus size={12} /></button>
       </span>
       <span className="flex min-w-0 items-center gap-2.5">
@@ -3988,7 +4013,7 @@ function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClea
         </span>
       </span>
       <span className="hidden text-right font-mono text-xs tabular-nums text-slate-600 dark:text-slate-300 lg:block">{money(item.unitPrice)}{item.retailPrice !== undefined && item.retailPrice !== item.unitPrice && <span className="block text-[10px] text-slate-400 line-through">{money(item.retailPrice)}</span>}</span>
-      <span className="text-right font-mono text-[13px] font-bold tabular-nums">{money(item.unitPrice * item.quantity)}</span>
+      <span className="text-right font-mono text-[13px] font-bold tabular-nums">{money(lineAmount(item.unitPrice, item.quantity))}</span>
       <button type="button" aria-label={`Remove ${item.label} from order`} onClick={() => item.onChange(-item.quantity)} className="justify-self-end text-slate-300 hover:text-red-500"><Trash2 size={14} /></button>
     </li>
   );
@@ -4011,7 +4036,7 @@ function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClea
       <div aria-hidden="true" className={`${orderRowGrid} shrink-0 border-b border-slate-100 bg-slate-50/80 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:border-slate-800 dark:bg-slate-800/60`}>
         <span className="pl-1">Qty</span><span>Description</span><span className="hidden text-right lg:block">Price</span><span className="text-right">Amount</span><span />
       </div>
-      <div ref={listRef} className="relative min-h-[120px] flex-1 overflow-y-auto">
+      <div ref={listRef} data-order-list className="relative min-h-[120px] flex-1 overflow-y-auto">
         {lines.length + customItems.length > 0 ? (
           <ul className="divide-y divide-slate-100 dark:divide-slate-800">
             {lines.map(({ key, product, wholesale, quantity }) => row({
@@ -4041,7 +4066,7 @@ function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClea
         )}
       </div>
       <div className="shrink-0 border-t border-slate-100 px-4 py-3 dark:border-slate-800">
-        {lineKeys.length > 0 && <p className="mb-2 hidden flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400 sm:flex"><span><Kbd>+</Kbd> <Kbd>−</Kbd> quantity</span><span><Kbd>Del</Kbd> remove</span><span><Kbd>Ctrl ↑↓</Kbd> pick line</span><span><Kbd>Ctrl Z</Kbd> undo add</span></p>}
+        {lineKeys.length > 0 && <p className="mb-2 hidden flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400 sm:flex"><span><Kbd>+</Kbd> <Kbd>−</Kbd> quantity</span><span><Kbd>Del</Kbd> remove</span><span><Kbd>↑↓</Kbd> pick line</span><span><Kbd>Ctrl Z</Kbd> undo add</span></p>}
         <div className="space-y-1.5 text-xs">
           <div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-mono font-medium tabular-nums text-slate-700 dark:text-slate-200">{money(hasWholesale ? subtotal + savings : subtotal)}</span></div>
           {hasWholesale && savings > 0 && <div className="flex justify-between text-emerald-700 dark:text-emerald-400"><span>Wholesale savings</span><span className="font-mono font-medium tabular-nums">−{money(savings)}</span></div>}
@@ -4334,8 +4359,8 @@ function OrderDetailsDialog({ order, onClose }: { order: Order; onClose: () => v
         <ul className="divide-y divide-slate-100 rounded-xl border border-slate-100 dark:divide-slate-800 dark:border-slate-800">
           {order.lines.map((line, index) => (
             <li key={`${line.name}-${index}`} className="flex items-start justify-between gap-3 px-4 py-3 text-xs">
-              <div className="min-w-0"><p className="flex items-center gap-1.5 font-semibold"><span className="truncate">{line.name}</span>{line.custom && <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-800">Custom</span>}{line.wholesale && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Wholesale</span>}</p><p className="mt-0.5 text-[11px] text-slate-400"><span className="font-mono">{line.quantity} × {money(line.unitPrice)}</span></p></div>
-              <span className="shrink-0 font-mono font-semibold">{money(line.quantity * line.unitPrice)}</span>
+              <div className="min-w-0"><p className="flex items-center gap-1.5 font-semibold"><span className="truncate">{line.name}</span>{line.custom && <span className="shrink-0 rounded-full bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-500 dark:bg-slate-800">Custom</span>}{line.wholesale && <span className="shrink-0 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Wholesale</span>}</p><p className="mt-0.5 text-[11px] text-slate-400"><span className="font-mono">{formatQuantity(line.quantity)} × {money(line.unitPrice)}</span></p></div>
+              <span className="shrink-0 font-mono font-semibold">{money(lineAmount(line.unitPrice, line.quantity))}</span>
             </li>
           ))}
         </ul>
