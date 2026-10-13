@@ -56,6 +56,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { AUTH_STORAGE_KEY, callPosAdmin, createClient } from "@/lib/supabase/client";
+import { loadStoreConnection, projectRef, type StoreConnection } from "@/lib/store-connection";
+import { ConnectStoreScreen } from "@/components/connect-store";
 import { deletePendingOrder, isNetworkError, listPendingOrders, readCache, savePendingOrder, storedSessionUserId, writeCache, type PendingOrder } from "@/lib/offline-store";
 import { buildCashCountReport, buildRefundReceipt, buildSaleReceipt, defaultStoreDetails, type StoreDetails } from "@/lib/receipts";
 import { checkForUpdates, defaultHardwareSettings, installUpdate, isDesktopApp, loadHardwareSettings, openCashDrawer, printDocument, saveHardwareSettings, supportsLiveUpdates, watchUpdateStatus, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
@@ -500,6 +502,10 @@ function validateImportedProducts(records: RawProductRecord[]) {
 export default function Home() {
   const [signedIn, setSignedIn] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  // The store (Supabase project) this device is connected to; undefined until
+  // read from this device, null if it has never been connected.
+  const [storeConnection, setStoreConnection] = useState<StoreConnection | null | undefined>(undefined);
+  const [changingStore, setChangingStore] = useState(false);
   const [role, setRole] = useState<Role>("employee");
   const [employeeName, setEmployeeName] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
@@ -707,6 +713,9 @@ export default function Home() {
 
     async function restoreSession() {
       try {
+        const store = loadStoreConnection();
+        setStoreConnection(store);
+        if (!store) return; // Not connected yet: the connect screen shows.
         // Read the saved session without a network call, so a signed-out
         // launch shows the login screen immediately and an offline launch can
         // reopen the saved workspace.
@@ -744,6 +753,9 @@ export default function Home() {
       }
     }
     void restoreSession();
+    // Not connected to a store yet: nothing to listen to (the connect screen
+    // shows, and connecting reloads the app).
+    if (!loadStoreConnection()) return () => { cancelled = true; };
     // If the session ends elsewhere (expired refresh token, password change),
     // go back to the sign-in screen instead of failing on every request.
     const { data: { subscription } } = createClient().auth.onAuthStateChange((event) => {
@@ -2572,6 +2584,10 @@ export default function Home() {
     }
   }
 
+  if (!checkingAuth && storeConnection !== undefined && (!storeConnection || (changingStore && !signedIn))) {
+    return <ConnectStoreScreen current={storeConnection} onCancel={changingStore ? () => setChangingStore(false) : undefined} />;
+  }
+
   if (checkingAuth) {
     return <main className="grid min-h-screen place-items-center bg-[#f4f8ff] text-sm text-slate-500 dark:bg-slate-950"><span className="animate-pulse">Loading your store…</span></main>;
   }
@@ -2620,6 +2636,12 @@ export default function Home() {
                 <p className="mb-2 text-sm font-semibold text-blue-700 dark:text-blue-400">WELCOME BACK</p>
                 <h2 className="text-3xl font-semibold tracking-tight">Sign in to your store</h2>
                 <p className="mt-2 text-sm leading-6 text-slate-500">Enter your work email and password. Admins and employees sign in here.</p>
+                {storeConnection && (
+                  <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500">
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-white px-2.5 py-1 font-semibold text-slate-700 ring-1 ring-slate-200 dark:bg-slate-900 dark:text-slate-200 dark:ring-slate-700"><Store size={12} className="text-blue-600" />{storeConnection.name || projectRef(storeConnection.url)}</span>
+                    <button type="button" onClick={() => setChangingStore(true)} className="font-semibold text-blue-700 hover:text-blue-800 dark:text-blue-400">Change store</button>
+                  </p>
+                )}
               </div>
 
               {adminCreated && <div role="status" className="mb-5 flex items-start gap-2.5 rounded-xl border border-emerald-100 bg-emerald-50 p-3.5 text-xs leading-5 text-emerald-800"><Check size={16} className="mt-0.5 shrink-0" />Your admin account is ready. Sign in to set up your store.</div>}

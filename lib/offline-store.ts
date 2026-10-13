@@ -63,6 +63,25 @@ async function run<T>(storeName: string, mode: IDBTransactionMode, action: (stor
   });
 }
 
+// Deletes everything this device stored offline for its store (cached
+// catalog and orders, offline sign-in data, saved orders, drawer sessions).
+// Used when the device is connected to a different store; the caller checks
+// first that nothing is still waiting to sync.
+export async function eraseOfflineData() {
+  if (dbPromise) {
+    const db = await dbPromise.catch(() => null);
+    db?.close();
+    dbPromise = null;
+  }
+  if (typeof indexedDB === "undefined") return;
+  await new Promise<void>((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(DB_NAME);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error ?? new Error("Couldn’t clear this computer’s offline data."));
+    request.onblocked = () => reject(new Error("Close other windows of the POS on this computer, then try again."));
+  });
+}
+
 export async function savePendingOrder(order: PendingOrder) {
   await run("pendingOrders", "readwrite", (store) => store.put(order));
 }

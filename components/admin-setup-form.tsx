@@ -5,12 +5,14 @@ import { ArrowLeft, Coffee, LoaderCircle, ShieldCheck } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { callPosAdmin, createClient } from "@/lib/supabase/client";
+import { loadStoreConnection, projectRef } from "@/lib/store-connection";
 import { FormEvent, useEffect, useState } from "react";
 
 export function AdminSetupForm() {
   const [available, setAvailable] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [storeLabel, setStoreLabel] = useState("");
 
   const router = useRouter();
 
@@ -18,6 +20,8 @@ export function AdminSetupForm() {
     let active = true;
     (async () => {
       try {
+        const store = loadStoreConnection();
+        if (active && store) setStoreLabel(store.name || projectRef(store.url));
         const { data, error: rpcError } = await createClient().rpc("is_admin_setup_available");
         if (rpcError) throw new Error(`Unable to check admin setup: ${rpcError.message}`);
         if (active) setAvailable(data === true);
@@ -58,6 +62,7 @@ export function AdminSetupForm() {
         <div className="mb-6 flex h-12 w-12 items-center justify-center rounded-xl bg-blue-600 text-white"><Coffee size={23} /></div>
         <p className="text-xs font-bold tracking-widest text-blue-600">CLOVER &amp; CO.</p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight">Set up your store admin</h1>
+        {storeLabel && <p className="mt-2 text-xs text-slate-500">Store: <b className="font-semibold text-slate-700 dark:text-slate-200">{storeLabel}</b></p>}
         <p className="mt-2 text-sm leading-6 text-slate-500">Create the first administrator. This one-time setup closes automatically after an admin account exists.</p>
 
         {available === null ? (

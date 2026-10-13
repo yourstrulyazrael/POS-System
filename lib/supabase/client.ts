@@ -1,19 +1,18 @@
 import { createClient as createSupabaseClient, FunctionsHttpError, type SupabaseClient } from "@supabase/supabase-js";
+import { loadStoreConnection } from "@/lib/store-connection";
 
 // The app is a static export (no Next.js server), packaged for desktop, so
 // the session lives in localStorage instead of cookies. One shared client
-// keeps a single auth listener and token-refresh timer.
+// keeps a single auth listener and token-refresh timer. It talks to the
+// store this device is connected to (lib/store-connection.ts).
 let client: SupabaseClient | null = null;
 export const AUTH_STORAGE_KEY = "clover-pos-auth";
 
 export function createClient() {
   if (!client) {
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-    if (!url || !key) {
-      throw new Error("Supabase is not configured. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY before building the app.");
-    }
-    client = createSupabaseClient(url, key, {
+    const store = loadStoreConnection();
+    if (!store) throw new Error("This device isn’t connected to a store yet. Open the app’s home page and enter your store code.");
+    client = createSupabaseClient(store.url, store.key, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: AUTH_STORAGE_KEY },
     });
   }

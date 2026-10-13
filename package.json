@@ -1,7 +1,7 @@
 {
   "name": "clover-pos",
   "productName": "Clover POS",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Point of sale for Clover & Co.",
   "author": "Clover & Co.",
   "private": true,
@@ -15,7 +15,8 @@
     "dist:win": "next build && electron-builder --win nsis",
     "release:win": "next build && electron-builder --win nsis --publish always",
     "update:test": "node scripts/update-test.mjs build-and-serve",
-    "update:test-launch": "node scripts/update-test.mjs launch"
+    "update:test-launch": "node scripts/update-test.mjs launch",
+    "store:code": "node scripts/store-code.mjs"
   },
   "build": {
     "appId": "co.clover.pos",
