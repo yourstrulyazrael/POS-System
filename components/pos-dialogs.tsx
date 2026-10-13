@@ -8,6 +8,7 @@ import type { CashSession } from "@/lib/cash-session";
 import { expectedCash } from "@/lib/cash-session";
 import { isDesktopApp, listPrinters, type DrawerMode, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
 import { pesoDenominations, type StoreDetails } from "@/lib/receipts";
+import type { SuspendedOrder } from "@/lib/suspended-orders";
 import { formatQuantity, lineAmount, roundQuantity } from "@/lib/quantity";
 
 type PaymentMethod = "cash" | "e_wallet" | "card";
@@ -432,5 +433,87 @@ export function UpdatesCard({ status, onCheck, onInstall }: {
         )}
       </div>
     </div>
+  );
+}
+
+// ---------- saved (suspended) orders ----------
+
+export function SuspendDialog({ itemCount, total, onSave, onClose }: { itemCount: number; total: number; onSave: (note: string) => Promise<void>; onClose: () => void }) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      await onSave(note.trim().slice(0, 60));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Dialog label="Save order for later" eyebrow="SAVE ORDER" title="Save for later" subtitle={`${itemCount} item${itemCount === 1 ? "" : "s"} · ${money(total)}. Serve the next customer, then recall this order.`} onClose={onClose} busy={busy}>
+      <form noValidate onSubmit={submit} className="space-y-4">
+        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Note <span className="font-normal text-slate-400">(optional)</span>
+          <input autoFocus maxLength={60} value={note} onChange={(event) => setNote(event.currentTarget.value)} placeholder="e.g. Customer name, or “blue shirt”" className={inputClass} />
+        </label>
+        <p className="text-[11px] leading-4 text-slate-400">Saved on this computer. Stock isn’t held aside; it’s checked again when you recall the order.</p>
+        <Actions busy={busy} onCancel={onClose} submitLabel="Save order" />
+      </form>
+    </Dialog>
+  );
+}
+
+export function RecallDialog({ orders, currentHasItems, onResume, onDiscard, onClose }: {
+  orders: SuspendedOrder[];
+  currentHasItems: boolean;
+  onResume: (id: string) => void;
+  onDiscard: (id: string) => void;
+  onClose: () => void;
+}) {
+  const [confirmDiscard, setConfirmDiscard] = useState<string | null>(null);
+  // 1–9 recall the order with that number.
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.ctrlKey || event.altKey || event.metaKey || !/^[1-9]$/.test(event.key)) return;
+      const order = orders[Number(event.key) - 1];
+      if (!order) return;
+      event.preventDefault();
+      onResume(order.id);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [orders, onResume]);
+
+  return (
+    <Dialog wide label="Recall a saved order" eyebrow="RECALL ORDER" title="Saved orders" subtitle={currentHasItems ? "The order on screen is saved first, so you can come back to it." : "Pick an order to continue it."} onClose={onClose}>
+      {orders.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-slate-200 px-4 py-8 text-center text-sm text-slate-400 dark:border-slate-700">No saved orders on this computer.</p>
+      ) : (
+        <ul className="divide-y divide-slate-100 rounded-xl border border-slate-100 dark:divide-slate-800 dark:border-slate-800">
+          {orders.map((order, index) => (
+            <li key={order.id} className="flex items-center gap-3 px-3 py-2.5">
+              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-slate-100 font-mono text-xs font-bold text-slate-500 dark:bg-slate-800">{index + 1}</span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold">{order.note || "Unnamed order"}</p>
+                <p className="mt-0.5 text-[11px] text-slate-400">
+                  <span className="font-mono">{order.itemCount}</span> item{order.itemCount === 1 ? "" : "s"} · <span className="font-mono">{money(order.total)}</span>{order.wholesaleMode ? " · wholesale mode" : ""} · {new Date(order.savedAt).toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" })}{order.savedBy ? ` by ${order.savedBy}` : ""}
+                </p>
+              </div>
+              {confirmDiscard === order.id ? (
+                <span className="flex shrink-0 items-center gap-1.5 text-xs">
+                  <button type="button" onClick={() => { onDiscard(order.id); setConfirmDiscard(null); }} className="h-8 rounded-lg bg-red-600 px-2.5 font-semibold text-white hover:bg-red-700">Discard</button>
+                  <button type="button" onClick={() => setConfirmDiscard(null)} className="h-8 rounded-lg px-2 font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Keep</button>
+                </span>
+              ) : (
+                <>
+                  <button type="button" aria-label={`Discard ${order.note || "unnamed order"}`} title="Discard" onClick={() => setConfirmDiscard(order.id)} className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-300 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-950/40"><X size={15} /></button>
+                  <button type="button" autoFocus={index === 0} onClick={() => onResume(order.id)} className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"><RotateCcw size={13} />Resume{index < 9 && <KeyHint>{String(index + 1)}</KeyHint>}</button>
+                </>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Dialog>
   );
 }

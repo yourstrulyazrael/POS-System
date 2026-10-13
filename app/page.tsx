@@ -18,6 +18,8 @@ import {
   Coffee,
   CreditCard,
   Banknote,
+  CirclePause,
+  History,
   CircleHelp,
   LayoutDashboard,
   Download,
@@ -68,7 +70,8 @@ import { useFunctionKeys, type FunctionKey } from "@/lib/use-function-keys";
 import { formatQuantity, isValidCustomQuantity, itemCountOf, lineAmount, roundQuantity } from "@/lib/quantity";
 import { defaultPosLayout, loadPosLayout, normalizeLayout, savePosLayout, type PosLayout } from "@/lib/pos-layout";
 import { CartResizeHandle, PosLayoutPanel } from "@/components/pos-layout-panel";
-import { CashCountDialog, DrawerStatusButton, HardwareSettingsCard, OpenDrawerDialog, ReconnectBanner, RefundDialog, RefundIcon, StoreDetailsCard, UpdateReadyBar, UpdatesCard, VoidDialog, VoidIcon } from "@/components/pos-dialogs";
+import { CashCountDialog, DrawerStatusButton, HardwareSettingsCard, OpenDrawerDialog, ReconnectBanner, RecallDialog, RefundDialog, RefundIcon, StoreDetailsCard, SuspendDialog, UpdateReadyBar, UpdatesCard, VoidDialog, VoidIcon } from "@/components/pos-dialogs";
+import { listSuspendedOrders, MAX_SUSPENDED_ORDERS, saveSuspendedOrders, type SuspendedOrder } from "@/lib/suspended-orders";
 import { buildProductsXlsx, buildTemplateXlsx, importColumns, readProductFile, type RawProductRecord } from "@/lib/product-import";
 import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState, type ChangeEvent, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
@@ -574,6 +577,10 @@ export default function Home() {
   // POS screen layout for this till (tile size, order width, text size).
   const [posLayout, setPosLayout] = useState<PosLayout>(defaultPosLayout);
   const [showLayoutPanel, setShowLayoutPanel] = useState(false);
+  // Orders put on hold (Save, Ctrl+S) and brought back (Recall, Ctrl+R).
+  const [suspendedOrders, setSuspendedOrders] = useState<SuspendedOrder[]>([]);
+  const [showSuspend, setShowSuspend] = useState(false);
+  const [showRecall, setShowRecall] = useState(false);
   const headerRef = useRef<HTMLElement>(null);
   const cartWrapperRef = useRef<HTMLDivElement>(null);
   const posGridRef = useRef<HTMLDivElement>(null);
@@ -1048,6 +1055,91 @@ export default function Home() {
     additionsRef.current = [];
   }
 
+  // ---------- saved (suspended) orders ----------
+
+  // Puts the order on screen on hold and clears it for the next customer.
+  async function suspendOrder(note: string, list = suspendedOrders) {
+    if (!itemCount) return list;
+    if (list.length >= MAX_SUSPENDED_ORDERS) {
+      setNotice(`Up to ${MAX_SUSPENDED_ORDERS} orders can be saved. Recall or discard one first.`);
+      return null;
+    }
+    const saved: SuspendedOrder = {
+      id: crypto.randomUUID(),
+      savedAt: new Date().toISOString(),
+      savedBy: employeeName,
+      note,
+      cart,
+      customItems,
+      wholesaleMode,
+      total,
+      itemCount,
+    };
+    const next = [...list, saved];
+    try {
+      await saveSuspendedOrders(next);
+    } catch (error) {
+      setNotice(`Couldn’t save the order: ${error instanceof Error ? error.message : "storage error"}`);
+      return null;
+    }
+    setSuspendedOrders(next);
+    clearOrder();
+    setShowSuspend(false);
+    setNotice(`Order saved${note ? ` as “${note}”` : ""}. Recall it any time with Recall (Ctrl+R).`);
+    return next;
+  }
+
+  // Brings a saved order back. An order already on screen is saved first.
+  // Stock and prices are today's: products no longer sold are dropped and
+  // quantities are capped at the stock left.
+  async function resumeOrder(id: string) {
+    const saved = suspendedOrders.find((order) => order.id === id);
+    if (!saved) return;
+    let list = suspendedOrders.filter((order) => order.id !== id);
+    const switched = itemCount > 0;
+    if (switched) {
+      const afterSave = await suspendOrder("", list);
+      if (!afterSave) return;
+      list = afterSave;
+    }
+    const restored: Record<string, number> = {};
+    const used = new Map<string, number>();
+    const changes: string[] = [];
+    for (const [key, quantity] of Object.entries(saved.cart)) {
+      const product = productsById.get(parseCartKey(key).productId);
+      if (!product) { changes.push("an item that is no longer sold was removed"); continue; }
+      const available = product.stock - (used.get(product.id) ?? 0);
+      const kept = Math.min(quantity, Math.max(0, available));
+      if (kept < quantity) changes.push(`${product.name} reduced to ${kept} (stock)`);
+      if (kept > 0) { restored[key] = kept; used.set(product.id, (used.get(product.id) ?? 0) + kept); }
+    }
+    try {
+      await saveSuspendedOrders(list);
+    } catch (error) {
+      setNotice(`Couldn’t recall the order: ${error instanceof Error ? error.message : "storage error"}`);
+      return;
+    }
+    setSuspendedOrders(list);
+    setCart(restored);
+    setCustomItems(saved.customItems);
+    setWholesaleMode(saved.wholesaleMode);
+    setSelectedLine(null);
+    additionsRef.current = [];
+    setShowRecall(false);
+    setNotice(`Recalled ${saved.note ? `“${saved.note}”` : "the saved order"}${switched ? "; the previous order was saved" : ""}.${changes.length ? ` Note: ${[...new Set(changes)].join("; ")}.` : ""}`);
+  }
+
+  async function discardSuspendedOrder(id: string) {
+    const list = suspendedOrders.filter((order) => order.id !== id);
+    try {
+      await saveSuspendedOrders(list);
+      setSuspendedOrders(list);
+      if (!list.length) setShowRecall(false);
+    } catch (error) {
+      setNotice(`Couldn’t discard the order: ${error instanceof Error ? error.message : "storage error"}`);
+    }
+  }
+
   function rememberAddition(key: string, custom: boolean, quantity: number) {
     additionsRef.current = [...additionsRef.current.slice(-49), { key, custom, quantity }];
     setSelectedLine(key);
@@ -1193,6 +1285,8 @@ export default function Home() {
     else if (showCashCount) setShowCashCount(false);
     else if (voidTarget) setVoidTarget(null);
     else if (refundTarget) setRefundTarget(null);
+    else if (showSuspend) setShowSuspend(false);
+    else if (showRecall) setShowRecall(false);
     else if (showMobileCart) setShowMobileCart(false);
     else if (showNotifications) setShowNotifications(false);
     else return false;
@@ -1203,7 +1297,7 @@ export default function Home() {
     if (!signedIn || event.defaultPrevented || event.isComposing) return;
     const target = event.target as HTMLElement | null;
     const inTextField = !!target?.closest("input, textarea, select, [contenteditable='true']");
-    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport || !!confirmAction || !!passwordEmployee || showSyncPanel || showOpenDrawer || showCashCount || !!voidTarget || !!refundTarget;
+    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport || !!confirmAction || !!passwordEmployee || showSyncPanel || showOpenDrawer || showCashCount || !!voidTarget || !!refundTarget || showSuspend || showRecall;
     const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
 
     if (event.key === "Escape") {
@@ -1252,6 +1346,16 @@ export default function Home() {
       if (customItems.some((item) => item.id === key)) changeCustomQuantity(key, difference);
       else changeQuantity(key, difference);
     };
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && (event.key.toLowerCase() === "s" || event.key.toLowerCase() === "r")) {
+      event.preventDefault();
+      if (event.repeat) return;
+      if (event.key.toLowerCase() === "s") {
+        if (itemCount) setShowSuspend(true);
+        else setNotice("Add items before saving an order for later.");
+      } else if (suspendedOrders.length) setShowRecall(true);
+      else setNotice("No saved orders on this computer.");
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "f") {
       event.preventDefault();
       searchInputRef.current?.focus();
@@ -1351,6 +1455,13 @@ export default function Home() {
       // Storage unavailable: keep images on.
     }
   }, []);
+
+  useEffect(() => {
+    if (!signedIn) return;
+    let cancelled = false;
+    listSuspendedOrders().then((orders) => { if (!cancelled) setSuspendedOrders(orders); }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [signedIn]);
 
   const shortcutHandlerRef = useRef(handleShortcut);
   useEffect(() => {
@@ -2753,6 +2864,9 @@ export default function Home() {
                     isProcessing={isLoading}
                     onClear={clearOrder}
                     onOpenDrawer={() => void openDrawer(true)}
+                    onSuspend={() => setShowSuspend(true)}
+                    onRecall={() => setShowRecall(true)}
+                    heldCount={suspendedOrders.length}
                     desktopKeys={isDesktopApp()}
                     selectedKey={selectedLine}
                     onSelect={setSelectedLine}
@@ -2842,7 +2956,7 @@ export default function Home() {
                                 <span className="min-w-0"><span className="block truncate text-[13px] font-semibold text-slate-800 dark:text-slate-100">{product.name}</span><span className="block truncate text-[10px] font-medium uppercase tracking-wide text-slate-400">{product.category}<span className="normal-case tracking-normal lg:hidden"> · <span className="font-mono">{left}</span> left</span></span></span>
                               </span>
                               <span className={`hidden text-right font-mono text-xs font-semibold tabular-nums lg:block ${left <= 0 ? "text-red-500" : left < 10 ? "text-amber-600" : "text-slate-600 dark:text-slate-300"}`}>{left}</span>
-                              <span className="text-right">{showWholesale ? <><span className="block font-mono text-[13px] font-bold tabular-nums text-emerald-600">{money(product.wholesalePrice)}</span><span className="block text-[9px] font-semibold uppercase tracking-wide text-emerald-600">Wholesale</span></> : <><span className="block font-mono text-[13px] font-bold tabular-nums text-blue-700 dark:text-blue-300">{money(product.price)}</span>{wholesaleMode && <span className="block text-[9px] font-semibold uppercase tracking-wide text-slate-400">Retail only</span>}</>}</span>
+                              <span className="text-right">{showWholesale ? <><span className="block font-mono text-[13px] font-bold tabular-nums text-black dark:text-white">{money(product.wholesalePrice)}</span><span className="block text-[9px] font-semibold uppercase tracking-wide text-emerald-600">Wholesale</span></> : <><span className="block font-mono text-[13px] font-bold tabular-nums text-black dark:text-white">{money(product.price)}</span>{wholesaleMode && <span className="block text-[9px] font-semibold uppercase tracking-wide text-slate-400">Retail only</span>}</>}</span>
                             </button>
                           );
                         })}
@@ -2861,7 +2975,7 @@ export default function Home() {
                                 <p className="truncate text-sm font-semibold text-slate-800">{product.name}</p>
                                 <p className="mt-1 text-[11px] text-slate-400">{product.category} · <span className="font-mono">{product.stock - quantityInCart(product.id)}</span> left</p>
                               </div>
-                              <span className="shrink-0 text-right">{showWholesale ? <><span className="block font-mono text-sm font-bold text-emerald-600">{money(product.wholesalePrice)}</span><span className="block text-[10px] font-semibold uppercase tracking-wide text-emerald-600">Wholesale</span></> : <><span className="block font-mono text-sm font-bold text-blue-700">{money(product.price)}</span>{wholesaleMode && <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Retail only</span>}</>}</span>
+                              <span className="shrink-0 text-right">{showWholesale ? <><span className="block font-mono text-sm font-bold text-black dark:text-white">{money(product.wholesalePrice)}</span><span className="block text-[10px] font-semibold uppercase tracking-wide text-emerald-600">Wholesale</span></> : <><span className="block font-mono text-sm font-bold text-black dark:text-white">{money(product.price)}</span>{wholesaleMode && <span className="block text-[10px] font-semibold uppercase tracking-wide text-slate-400">Retail only</span>}</>}</span>
                             </div>
                             {showImages && <span className="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-full bg-white text-blue-600 opacity-0 shadow-sm transition group-hover:opacity-100"><Plus size={16} /></span>}
                           </button>
@@ -3004,6 +3118,8 @@ export default function Home() {
       {showCashCount && cashSession && <CashCountDialog session={cashSession} onConfirm={finishDrawerSession} onClose={() => setShowCashCount(false)} onOpenDrawer={() => void openDrawer(true)} />}
       {voidTarget && <VoidDialog order={voidTarget} onConfirm={(reason, printSlip) => voidSale(voidTarget, reason, printSlip)} onClose={() => setVoidTarget(null)} />}
       {refundTarget && <RefundDialog order={refundTarget} onConfirm={(refund) => refundSale(refundTarget, refund)} onClose={() => setRefundTarget(null)} />}
+      {showSuspend && <SuspendDialog itemCount={itemCount} total={total} onSave={async (note) => { await suspendOrder(note); }} onClose={() => setShowSuspend(false)} />}
+      {showRecall && <RecallDialog orders={suspendedOrders} currentHasItems={itemCount > 0} onResume={(id) => void resumeOrder(id)} onDiscard={(id) => void discardSuspendedOrder(id)} onClose={() => setShowRecall(false)} />}
       {showLayoutPanel && currentView === "pos" && <PosLayoutPanel layout={posLayout} onChange={updateLayout} onClose={() => setShowLayoutPanel(false)} swapHint={isDesktopApp() ? "F10" : undefined} />}
       {showSyncPanel && <SyncPanel sales={pendingOrders} isOnline={isOnline} isSyncing={isSyncing} currentUserId={userId} isAdmin={isAdmin} onSync={(retryFailed) => void syncPendingOrders({ retryFailed })} onClose={() => setShowSyncPanel(false)} />}
       {confirmAction && <ConfirmDialog action={confirmAction} isWorking={isLoading} onConfirm={() => void runConfirmAction()} onCancel={() => setConfirmAction(null)} />}
@@ -3259,6 +3375,10 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
             <p className="mt-2 text-xs leading-5 text-slate-500">Scan or type it and press Enter — if it isn’t found, the Quick add window opens. You can also press F3 or click Quick add. Enter a description, quantity, and either the price each or the total amount. The quantity can have up to 2 decimal places, e.g. 0.25 or 1.50 for a quarter or one and a half kilos; type 0.25/ before the name to start with it. Catalog products are sold in whole numbers. Custom items don’t change stock and have no recorded cost, so orders containing them are left out of the estimated-profit figures.</p>
           </details>
           <details className="py-3">
+            <summary className="cursor-pointer text-sm font-semibold">Can I put an order on hold?</summary>
+            <p className="mt-2 text-xs leading-5 text-slate-500">Yes. Click Save (Ctrl+S) under the current order, add an optional note such as the customer’s name, and serve the next customer. Click Recall (Ctrl+R) to bring it back; if another order is on screen, it’s saved first so you can switch back and forth. Saved orders stay on this computer (also offline and after restarting). Stock isn’t held aside: when an order is recalled, today’s prices apply and quantities are checked against the stock left.</p>
+          </details>
+          <details className="py-3">
             <summary className="cursor-pointer text-sm font-semibold">How do categories work?</summary>
             <p className="mt-2 text-xs leading-5 text-slate-500">Categories come from your products. Admins create one by typing a new category name when adding or editing a product, or by including it in the category column of an import. Only categories that have products appear on Point of sale.</p>
           </details>
@@ -3297,6 +3417,8 @@ function HelpCenterDialog({ onClose, onNavigate, showInventory }: {
               ["F7 in checkout", "Print a receipt for this sale, or not"],
               ["F-keys in pop-ups", "Choose a pop-up’s options (shown on each option)"],
               ["F9", "Clear the current order"],
+              ["Ctrl + S", "Save the order for later (suspend) and start a new one"],
+              ["Ctrl + R", "Recall a saved order; 1–9 picks one in the list"],
               ["+ / −", "One more or one less of the highlighted order line (search box empty)"],
               ["Delete", "Remove the highlighted order line"],
               ["↑ ↓", "Move up or down the order (search box empty); the list scrolls along"],
@@ -3956,7 +4078,7 @@ const productRowGrid = "grid gap-3 grid-cols-[minmax(0,1fr)_5rem] lg:grid-cols-[
 // Order table: qty, description, price (wider screens), amount, remove.
 const orderRowGrid = "grid items-center gap-3 grid-cols-[6.25rem_minmax(0,1fr)_5.5rem_1.25rem] lg:grid-cols-[6.25rem_minmax(0,1fr)_5rem_5.5rem_1.25rem]";
 
-function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClear, onOpenDrawer, desktopKeys, selectedKey, onSelect, isProcessing, priceOf, hasWholesale, savings, onClose, customItems, onCustomChange, showImages, textScale = 100, wholesaleMode, onToggleWholesale }: {
+function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClear, onOpenDrawer, onSuspend, onRecall, heldCount, desktopKeys, selectedKey, onSelect, isProcessing, priceOf, hasWholesale, savings, onClose, customItems, onCustomChange, showImages, textScale = 100, wholesaleMode, onToggleWholesale }: {
   lines: CartLine[];
   count: number;
   subtotal: number;
@@ -3965,6 +4087,9 @@ function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClea
   onCheckout: () => void;
   onClear: () => void;
   onOpenDrawer: () => void;
+  onSuspend: () => void;
+  onRecall: () => void;
+  heldCount: number;
   desktopKeys: boolean;
   selectedKey: string | null;
   onSelect: (key: string) => void;
@@ -4009,11 +4134,11 @@ function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClea
         {showImages && item.artwork}
         <span className="min-w-0">
           <span className="flex items-center gap-1.5 text-[13px] font-semibold"><span className="truncate">{item.name}</span>{item.tag}</span>
-          <span className="block text-[11px] text-slate-400 lg:hidden"><span className="font-mono">{money(item.unitPrice)}</span> each</span>
+          <span className="block text-[11px] text-slate-400 lg:hidden"><span className="font-mono text-black dark:text-white">{money(item.unitPrice)}</span> each</span>
         </span>
       </span>
-      <span className="hidden text-right font-mono text-xs tabular-nums text-slate-600 dark:text-slate-300 lg:block">{money(item.unitPrice)}{item.retailPrice !== undefined && item.retailPrice !== item.unitPrice && <span className="block text-[10px] text-slate-400 line-through">{money(item.retailPrice)}</span>}</span>
-      <span className="text-right font-mono text-[13px] font-bold tabular-nums">{money(lineAmount(item.unitPrice, item.quantity))}</span>
+      <span className="hidden text-right font-mono text-xs tabular-nums text-black dark:text-white lg:block">{money(item.unitPrice)}{item.retailPrice !== undefined && item.retailPrice !== item.unitPrice && <span className="block text-[10px] text-slate-400 line-through">{money(item.retailPrice)}</span>}</span>
+      <span className="text-right font-mono text-[13px] font-bold tabular-nums text-black dark:text-white">{money(lineAmount(item.unitPrice, item.quantity))}</span>
       <button type="button" aria-label={`Remove ${item.label} from order`} onClick={() => item.onChange(-item.quantity)} className="justify-self-end text-slate-300 hover:text-red-500"><Trash2 size={14} /></button>
     </li>
   );
@@ -4021,15 +4146,20 @@ function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClea
 
   return (
     <aside aria-label="Current order" style={{ zoom: textScale / 100 }} className="flex h-full flex-col overflow-hidden border-l border-slate-100 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900 md:rounded-2xl md:border md:shadow-[0_3px_16px_rgba(20,45,90,0.035)]">
-      <div className="flex shrink-0 items-center gap-3 border-b border-slate-100 px-4 py-3 dark:border-slate-800">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-100 px-4 py-3 dark:border-slate-800">
         <ShoppingCart size={17} className="text-blue-600" />
         <h2 className="text-sm font-semibold">Current order</h2>
         <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-800">{count} {count === 1 ? "item" : "items"}</span>
-        {hasWholesale && <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Includes wholesale</span>}
-        <button type="button" role="switch" aria-checked={wholesaleMode} aria-keyshortcuts="F7" onClick={onToggleWholesale} title={wholesaleMode ? "Items you add now get wholesale prices" : "Turn on before adding bulk items"} className={`ml-auto flex h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 text-[11px] font-semibold transition ${wholesaleMode ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200" : "border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"}`}>
-          <span className={`relative h-4 w-7 shrink-0 rounded-full transition ${wholesaleMode ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"}`}><span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-all ${wholesaleMode ? "left-[14px]" : "left-0.5"}`} /></span>
-          Wholesale {wholesaleMode ? "on" : "off"}<Kbd>F7</Kbd>
-        </button>
+        {hasWholesale && <span className="hidden rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 2xl:inline">Includes wholesale</span>}
+        {/* Wraps as a group, kept to the right, when the panel is narrow. */}
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <button type="button" disabled={!heldCount} onClick={onRecall} aria-keyshortcuts="Control+R" title="Recall a saved order (Ctrl+R)" className="relative flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 text-[11px] font-semibold text-blue-700 transition hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-300 dark:hover:bg-blue-950"><History size={14} />Recall<Kbd>Ctrl R</Kbd>{heldCount > 0 && <span className="absolute -right-1.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-blue-600 px-1 font-mono text-[9px] font-bold text-white">{heldCount}</span>}</button>
+          <button type="button" disabled={!count} onClick={onClear} aria-keyshortcuts="F9" title="Clear the order (F9)" className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 text-[11px] font-semibold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950"><Trash2 size={14} />Clear<Kbd>F9</Kbd></button>
+          <button type="button" role="switch" aria-checked={wholesaleMode} aria-keyshortcuts="F7" onClick={onToggleWholesale} title={wholesaleMode ? "Items you add now get wholesale prices" : "Turn on before adding bulk items"} className={`flex h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 text-[11px] font-semibold transition ${wholesaleMode ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-200" : "border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"}`}>
+            <span className={`relative h-4 w-7 shrink-0 rounded-full transition ${wholesaleMode ? "bg-emerald-600" : "bg-slate-300 dark:bg-slate-600"}`}><span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white shadow transition-all ${wholesaleMode ? "left-[14px]" : "left-0.5"}`} /></span>
+            Wholesale {wholesaleMode ? "on" : "off"}<Kbd>F7</Kbd>
+          </button>
+        </div>
         <button type="button" aria-label="Close order panel" onClick={onClose} className="-mr-2 rounded-lg p-2 text-slate-400 hover:bg-slate-50 md:hidden"><X size={18} /></button>
       </div>
       {wholesaleMode && <p className="shrink-0 border-b border-emerald-200 bg-emerald-50 px-4 py-1.5 text-[11px] text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-200">Wholesale mode: items you add now get wholesale prices.</p>}
@@ -4068,15 +4198,17 @@ function CartPanel({ lines, count, subtotal, total, onChange, onCheckout, onClea
       <div className="shrink-0 border-t border-slate-100 px-4 py-3 dark:border-slate-800">
         {lineKeys.length > 0 && <p className="mb-2 hidden flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400 sm:flex"><span><Kbd>+</Kbd> <Kbd>−</Kbd> quantity</span><span><Kbd>Del</Kbd> remove</span><span><Kbd>↑↓</Kbd> pick line</span><span><Kbd>Ctrl Z</Kbd> undo add</span></p>}
         <div className="space-y-1.5 text-xs">
-          <div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-mono font-medium tabular-nums text-slate-700 dark:text-slate-200">{money(hasWholesale ? subtotal + savings : subtotal)}</span></div>
+          <div className="flex justify-between text-slate-500"><span>Subtotal <span className="text-slate-400">({count} items)</span></span><span className="font-mono font-medium tabular-nums text-black dark:text-white">{money(hasWholesale ? subtotal + savings : subtotal)}</span></div>
           {hasWholesale && savings > 0 && <div className="flex justify-between text-emerald-700 dark:text-emerald-400"><span>Wholesale savings</span><span className="font-mono font-medium tabular-nums">−{money(savings)}</span></div>}
-          <div className="flex items-baseline justify-between border-t border-dashed border-slate-200 pt-2 dark:border-slate-700"><span className="text-sm font-semibold">Total</span><span className="font-mono text-2xl font-bold tabular-nums text-slate-900 dark:text-white">{money(total)}</span></div>
+          <div className="flex items-baseline justify-between border-t border-dashed border-slate-200 pt-2 dark:border-slate-700"><span className="text-sm font-semibold">Total</span><span className="font-mono text-2xl font-bold tabular-nums text-black dark:text-white">{money(total)}</span></div>
         </div>
-        <div className="mt-3 grid grid-cols-[1fr_1fr_2fr] gap-2">
-          <button type="button" disabled={!count} onClick={onClear} aria-keyshortcuts="F9" className="flex h-14 flex-col items-center justify-center gap-0.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-red-950/40"><span className="flex items-center gap-1.5"><Trash2 size={15} />Clear</span><Kbd>F9</Kbd></button>
-          <button type="button" onClick={onOpenDrawer} className="flex h-14 flex-col items-center justify-center gap-0.5 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"><span className="flex items-center gap-1.5"><Banknote size={15} />Drawer</span>{desktopKeys && <Kbd>F6</Kbd>}</button>
-          <button type="button" disabled={!count || isProcessing} onClick={onCheckout} aria-keyshortcuts="F4" className="flex h-14 items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none dark:disabled:bg-slate-800"><CreditCard size={18} /> {isProcessing ? "Processing…" : "Checkout"}{!isProcessing && <Kbd>F4</Kbd>}</button>
+        {/* Colour says what a button does: yellow saves for later, grey is the
+            drawer, green checks out (blue Recall and red Clear are in the header). */}
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button type="button" disabled={!count} onClick={onSuspend} aria-keyshortcuts="Control+S" title="Save this order for later (Ctrl+S)" className="flex h-12 flex-col items-center justify-center gap-0.5 rounded-xl border text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-950"><span className="flex items-center gap-1.5"><CirclePause size={15} />Save</span><Kbd>Ctrl S</Kbd></button>
+          <button type="button" onClick={onOpenDrawer} className="flex h-12 flex-col items-center justify-center gap-0.5 rounded-xl border text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 border-slate-300 bg-slate-100 text-slate-700 hover:bg-slate-200 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"><span className="flex items-center gap-1.5"><Banknote size={15} />Drawer</span>{desktopKeys && <Kbd>F6</Kbd>}</button>
         </div>
+        <button type="button" disabled={!count || isProcessing} onClick={onCheckout} aria-keyshortcuts="F4" className="mt-2 flex h-14 w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 text-sm font-bold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none dark:disabled:bg-slate-800"><CreditCard size={18} /> {isProcessing ? "Processing…" : "Checkout"}{!isProcessing && <Kbd>F4</Kbd>}</button>
       </div>
     </aside>
   );
