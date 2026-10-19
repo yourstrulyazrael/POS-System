@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { ChevronDown, Moon, ReceiptText, RefreshCw, Store, Sun } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { StoreName } from "@/components/store-name";
+import { headerButton, headerSelect, PageTitle } from "@/components/page-header";
 
 type ShiftPeriod = "today" | "7days" | "30days";
 type ShiftType = "day" | "night";
@@ -146,17 +147,13 @@ export function ShiftHistoryView({ isAdmin }: { isAdmin: boolean }) {
 
   return (
     <section>
-      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Shifts</span></div>
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Shift history</h1>
-          <p className="mt-1 text-sm text-slate-500">{isAdmin ? "Orders and sales processed by each employee, per shift." : "Orders and sales you processed, per shift."} Day 6 AM–6 PM · Night 6 PM–6 AM.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <select aria-label="Shift history period" value={period} onChange={(event) => { setPeriod(event.target.value as ShiftPeriod); setExpanded(null); }} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-900">
+      <div className="mb-8 flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
+        <PageTitle eyebrow={<><StoreName /> · Shifts</>} icon={<Store size={12} />} title="Shift history" subtitle={<>{isAdmin ? "Orders and sales processed by each employee, per shift." : "Orders and sales you processed, per shift."} Day 6 AM–6 PM · Night 6 PM–6 AM.</>} />
+        <div className="flex flex-wrap items-center gap-3">
+          <select aria-label="Shift history period" value={period} onChange={(event) => { setPeriod(event.target.value as ShiftPeriod); setExpanded(null); }} className={headerSelect}>
             <option value="today">Today</option><option value="7days">Last 7 days</option><option value="30days">Last 30 days</option>
           </select>
-          <button type="button" onClick={() => void loadShifts()} disabled={isLoading} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900"><RefreshCw size={14} className={isLoading ? "animate-spin" : ""} /> Refresh</button>
+          <button type="button" onClick={() => void loadShifts()} disabled={isLoading} className={headerButton}><RefreshCw size={14} className={isLoading ? "animate-spin" : ""} /> Refresh</button>
         </div>
       </div>
 

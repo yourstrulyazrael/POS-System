@@ -60,6 +60,7 @@ import { AUTH_STORAGE_KEY, callPosAdmin, createClient } from "@/lib/supabase/cli
 import { loadStoreConnection, projectRef, type StoreConnection } from "@/lib/store-connection";
 import { ConnectStoreScreen } from "@/components/connect-store";
 import { StoreName, StoreNameContext } from "@/components/store-name";
+import { headerButton, headerPrimaryButton, PageHeader, PageTitle, Sparkline } from "@/components/page-header";
 import { deletePendingOrder, isNetworkError, listPendingOrders, readCache, savePendingOrder, storedSessionUserId, writeCache, type PendingOrder } from "@/lib/offline-store";
 import { buildCashCountReport, buildRefundReceipt, buildSaleReceipt, defaultStoreDetails, type StoreDetails } from "@/lib/receipts";
 import { checkForUpdates, defaultHardwareSettings, installUpdate, isDesktopApp, loadHardwareSettings, openCashDrawer, printDocument, saveHardwareSettings, supportsLiveUpdates, watchUpdateStatus, type HardwareSettings, type UpdateStatus } from "@/lib/hardware";
@@ -1452,6 +1453,12 @@ export default function Home() {
       } else if (event.key === "F6") void openDrawer(true);
       else if (event.key === "F12") { if (cashSession) setShowCashCount(true); else setShowOpenDrawer(true); }
       else if (activePage === "pos") updateLayout({ ...posLayout, cartSide: posLayout.cartSide === "left" ? "right" : "left" });
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      goToPage("pos");
+      window.setTimeout(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); }, 0);
       return;
     }
     if (activePage !== "pos") return;
@@ -2898,27 +2905,30 @@ export default function Home() {
             {updateStatus?.state === "ready" && <UpdateReadyBar version={updateStatus.version} busy={installingUpdate} onRestart={restartToUpdate} testFeed={updateStatus.testFeed} />}
             {offlineSession && isOnline && <ReconnectBanner email={accountEmail} onReconnect={reconnectOnline} />}
             {!connected && <OfflineBanner signedIn waiting={waitingToSync} />}
-            <div className="flex h-[72px] items-center gap-3 px-4 sm:px-7 xl:px-9">
+            <div className={`flex h-[88px] items-center gap-3 px-4 sm:px-8 ${currentView === "pos" ? "xl:px-9" : "xl:px-14"}`}>
             <div className="shrink-0 xl:hidden"><Brand compact name={brandName} /></div>
             <div className="hidden shrink-0 xl:block"><Brand name={brandName} /></div>
             {/* Page icons; the name (and Alt+N shortcut) appears on hover or focus. */}
-            <nav aria-label="Workspace navigation" className="ml-2 hidden flex-1 items-center gap-1 md:flex xl:ml-6">
+            <nav aria-label="Workspace navigation" className="ml-2 hidden flex-1 items-center gap-1.5 md:flex xl:ml-8">
               {navItems.map((item, index) => <NavIcon key={item.page} icon={item.icon} label={item.label} shortcut={`Alt+${index + 1}`} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
             </nav>
-            <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3">
-              <button type="button" aria-label="Open help center (F1)" title="Help (F1)" aria-keyshortcuts="F1" onClick={() => setShowHelpCenter(true)} className="grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={19} /></button>
-              <div className="hidden items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300 lg:flex">
-                <Clock3 size={14} className="text-slate-400" />
+            <button type="button" onClick={() => { goToPage("pos"); window.setTimeout(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); }, 0); }} aria-keyshortcuts="Control+K" className="ml-auto hidden h-12 w-[320px] shrink-0 items-center gap-3 rounded-xl border border-slate-200 px-4 text-left text-base text-slate-400 transition hover:border-blue-200 dark:border-slate-700 xl:flex">
+              <Search size={20} className="shrink-0" /><span className="flex-1 truncate">Search products or scan…</span><kbd className="rounded border border-slate-200 px-1.5 py-0.5 font-mono text-[11px] text-slate-400 dark:border-slate-700">Ctrl K</kbd>
+            </button>
+            <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3 xl:ml-3">
+              <button type="button" aria-label="Open help center (F1)" title="Help (F1)" aria-keyshortcuts="F1" onClick={() => setShowHelpCenter(true)} className="grid h-12 w-12 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={25} /></button>
+              <div className="hidden items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5 text-sm font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300 lg:flex">
+                <Clock3 size={17} className="text-slate-400" />
                 {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
               </div>
               <DrawerStatusButton session={cashSession} onOpen={() => setShowOpenDrawer(true)} onCount={() => setShowCashCount(true)} />
               <SyncStatusButton isOnline={connected} isSyncing={isSyncing} waiting={waitingToSync} failed={failedToSync} onClick={() => setShowSyncPanel(true)} />
               <div className="relative">
-                <button type="button" aria-label="Notifications" aria-expanded={showNotifications} onClick={() => setShowNotifications((current) => !current)} className="relative grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800">
-                  <Bell size={19} />
+                <button type="button" aria-label="Notifications" aria-expanded={showNotifications} onClick={() => setShowNotifications((current) => !current)} className="relative grid h-12 w-12 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800">
+                  <Bell size={25} />
                   {unreadNotificationCount > 0 && <span className="absolute -right-0.5 -top-0.5 grid min-h-4 min-w-4 place-items-center rounded-full bg-red-500 px-1 text-[9px] font-bold text-white ring-2 ring-white dark:ring-slate-900">{unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}</span>}
                 </button>
-                {showNotifications && <div className="absolute right-0 top-12 z-50 w-[min(340px,calc(100vw-32px))] overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
+                {showNotifications && <div className="absolute right-0 top-14 z-50 w-[min(340px,calc(100vw-32px))] overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
                   <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3 dark:border-slate-700"><div><p className="text-sm font-semibold">Notifications</p><p className="text-[11px] text-slate-400">{unreadNotificationCount} unread</p></div><button type="button" onClick={() => setReadNotifications(notifications.map((item) => item.id))} className="text-[11px] font-semibold text-blue-600 hover:text-blue-700">Mark all read</button></div>
                   {notifications.length > 0 ? <div className="max-h-80 overflow-y-auto">{notifications.map((item) => {
                     const unread = !readNotifications.includes(item.id);
@@ -2929,12 +2939,12 @@ export default function Home() {
               <ThemeSwitcher />
               <div className="hidden h-8 w-px bg-slate-100 dark:bg-slate-800 sm:block" />
               <div className="flex items-center gap-2.5">
-                <div className="grid h-9 w-9 place-items-center rounded-full bg-blue-100 text-xs font-bold text-blue-700">{employeeName.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div>
+                <div className="grid h-11 w-11 place-items-center rounded-full bg-blue-100 text-sm font-bold text-blue-700">{employeeName.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div>
                 <div className="hidden xl:block">
-                  <p className="text-xs font-semibold">{employeeName}</p>
-                  <p className="mt-0.5 text-[10px] capitalize text-slate-400">{role}</p>
+                  <p className="text-sm font-semibold">{employeeName}</p>
+                  <p className="mt-0.5 text-xs capitalize text-slate-400">{role}</p>
                 </div>
-                <button type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800"><LogOut size={16} /></button>
+                <button type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()} className="rounded-xl p-2.5 text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800"><LogOut size={22} /></button>
               </div>
             </div>
             </div>
@@ -2944,7 +2954,7 @@ export default function Home() {
             </nav>
           </header>
 
-          <div className="p-4 sm:p-7 xl:p-9">
+          <div className={currentView === "pos" ? "p-4 sm:p-7 xl:p-9" : "px-4 py-7 sm:px-8 sm:py-9 xl:px-14 xl:py-11"}>
             {notice && (
               <div role="status" className={`mb-5 flex items-center justify-between rounded-xl border px-4 py-3 text-sm ${noticeIsSuccess ? "border-emerald-100 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-200" : "border-blue-100 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-200"}`}>
                 <span className="flex items-center gap-2">{noticeIsSuccess ? <Check size={16} className="shrink-0" /> : <Info size={16} className="shrink-0" />}{notice}</span>
@@ -3004,6 +3014,8 @@ export default function Home() {
                 period={salesPeriod}
                 lastRefreshedAt={lastRefreshedAt}
                 isRefreshing={isRefreshing}
+                userName={employeeName}
+                onNewSale={() => setActivePage("pos")}
                 onPeriodChange={(period) => void refreshDashboard(period)}
                 onRefresh={() => void refreshDashboard()}
                 onViewAnalytics={() => setActivePage("analytics")}
@@ -3382,8 +3394,8 @@ export default function Home() {
 function Brand({ name, light = false, compact = false }: { name: string; light?: boolean; compact?: boolean }) {
   return (
     <div className="flex items-center gap-2.5">
-      <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${light ? "bg-white/15 text-white" : "bg-blue-600 text-white"} ${compact ? "h-9 w-9" : ""}`}><Coffee size={compact ? 19 : 21} strokeWidth={2.2} /></div>
-      {!compact && <div><p className={`max-w-[220px] truncate text-[15px] font-bold tracking-tight ${light ? "text-white" : "text-slate-900"}`}>{name}</p><p className={`mt-0.5 text-[10px] ${light ? "text-blue-200" : "text-slate-400"}`}>POINT OF SALE</p></div>}
+      <div className={`grid shrink-0 place-items-center rounded-xl ${light ? "bg-white/15 text-white" : "bg-blue-600 text-white"} ${compact ? "h-11 w-11" : "h-12 w-12"}`}><Coffee size={compact ? 22 : 25} strokeWidth={2.2} /></div>
+      {!compact && <div><p className={`max-w-[240px] truncate text-lg font-bold tracking-tight ${light ? "text-white" : "text-slate-900"}`}>{name}</p><p className={`mt-0.5 text-[11px] ${light ? "text-blue-200" : "text-slate-400"}`}>POINT OF SALE</p></div>}
     </div>
   );
 }
@@ -3398,9 +3410,9 @@ function NavIcon({ icon: Icon, label, shortcut, active, onClick }: { icon: Lucid
       aria-label={label}
       aria-current={active ? "page" : undefined}
       aria-keyshortcuts={shortcut}
-      className={`group relative grid h-10 w-10 shrink-0 place-items-center rounded-xl transition ${active ? "bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300" : "text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"}`}
+      className={`group relative grid h-11 w-11 shrink-0 place-items-center rounded-xl border transition md:h-14 md:w-14 md:rounded-2xl ${active ? "border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/60 dark:text-blue-300" : "border-transparent text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"}`}
     >
-      <Icon size={19} strokeWidth={active ? 2.2 : 1.8} />
+      <Icon size={28} className="h-6 w-6 md:h-7 md:w-7" strokeWidth={active ? 2.1 : 1.8} />
       <span aria-hidden="true" className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-hover:delay-150 group-focus-visible:opacity-100 dark:bg-slate-700">
         {label}{shortcut && <span className="ml-1.5 text-slate-400">{shortcut}</span>}
       </span>
@@ -3442,8 +3454,10 @@ function AdminOverview({
   period,
   lastRefreshedAt,
   isRefreshing,
+  userName,
   onPeriodChange,
   onRefresh,
+  onNewSale,
   onViewAnalytics,
   onViewInventory,
   onViewOrders,
@@ -3455,45 +3469,126 @@ function AdminOverview({
   period: SalesPeriod;
   lastRefreshedAt: Date | null;
   isRefreshing: boolean;
+  userName: string;
   onPeriodChange: (period: SalesPeriod) => void;
   onRefresh: () => void;
+  onNewSale: () => void;
   onViewAnalytics: () => void;
   onViewInventory: () => void;
   onViewOrders: () => void;
 }) {
   const lowStockProducts = products.filter((product) => product.stock <= 5);
-  const cards: { label: string; value: string; detail: string; icon: LucideIcon; color: string }[] = [
-    { label: "Sales", value: money(stats.sales_total), detail: periodLabel(period), icon: CircleDollarSign, color: "bg-blue-50 text-blue-600" },
-    { label: "Orders", value: String(stats.orders_today), detail: period === "today" ? "Today · Asia/Manila" : periodLabel(period), icon: ReceiptText, color: "bg-violet-50 text-violet-600" },
-    { label: "Inventory", value: String(stats.units_in_stock), detail: `${stats.active_products} active products`, icon: Boxes, color: "bg-emerald-50 text-emerald-600" },
-    { label: "Employees", value: String(stats.active_employees), detail: "Active staff accounts", icon: Users, color: "bg-amber-50 text-amber-600" },
+  const outOfStock = lowStockProducts.filter((product) => product.stock <= 0).length;
+  const hour = Number(new Intl.DateTimeFormat("en-US", { hour: "numeric", hourCycle: "h23", timeZone: "Asia/Manila" }).format(new Date()));
+  const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const firstName = userName.trim().split(/\s+/)[0] || "there";
+  const averageSale = stats.orders_today ? stats.sales_total / stats.orders_today : 0;
+  const revenueTrend = salesChart.map((point) => point.cash + point.eWallet + point.card);
+  const periodTag = period === "today" ? "TODAY" : period === "7days" ? "7 DAYS" : "30 DAYS";
+  const twoDigits = (value: number) => String(value).padStart(2, "0");
+  const topCards: { label: string; value: string; detail: string; icon: LucideIcon; chip: string }[] = [
+    { label: "Sales", value: money(stats.sales_total), detail: periodLabel(period), icon: CircleDollarSign, chip: "bg-blue-50 text-blue-600 dark:bg-blue-950/60 dark:text-blue-300" },
+    { label: "Transactions", value: twoDigits(stats.orders_today), detail: period === "today" ? "Completed sales today" : `Completed sales · ${periodLabel(period)}`, icon: ReceiptText, chip: "bg-violet-50 text-violet-600 dark:bg-violet-950/60 dark:text-violet-300" },
+    { label: "Average sale", value: money(averageSale), detail: "Per transaction", icon: BarChart3, chip: "bg-emerald-50 text-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-300" },
   ];
+  const card = "rounded-2xl border border-slate-100 bg-white dark:border-slate-800 dark:bg-slate-900";
   return (
     <section>
-      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Dashboard</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Store dashboard</h1><p className="mt-1 text-sm text-slate-500">Live sales, team, and inventory performance.</p></div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" onClick={onViewAnalytics} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><BarChart3 size={14} /> Analytics &amp; Reports</button>
-          <select aria-label="Sales report period" value={period} onChange={(event) => onPeriodChange(event.target.value as SalesPeriod)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold outline-none focus:border-blue-400">
+      <PageHeader
+        eyebrow={<><StoreName /> · Dashboard</>}
+        icon={<Store size={12} />}
+        title={`${greeting}, ${firstName}`}
+        subtitle="Here’s what’s happening at your store."
+        actions={<>
+          <button type="button" onClick={onViewAnalytics} className={headerButton}><BarChart3 size={18} /> Reports</button>
+          <button type="button" onClick={onViewInventory} className={headerButton}><Boxes size={18} /> Inventory</button>
+          <button type="button" onClick={onNewSale} className={headerPrimaryButton}><Plus size={18} /> New sale</button>
+        </>}
+      />
+
+      {lowStockProducts.length > 0 && (
+        <div role="status" className="mb-7 flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-5 py-3.5 text-[15px] font-medium text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100">
+          <TriangleAlert size={20} className="shrink-0" />
+          <span className="flex-1">{outOfStock > 0 ? `${outOfStock} product${outOfStock === 1 ? " is" : "s are"} out of stock` : ""}{outOfStock > 0 && lowStockProducts.length > outOfStock ? " and " : ""}{lowStockProducts.length > outOfStock ? `${lowStockProducts.length - outOfStock} ${lowStockProducts.length - outOfStock === 1 ? "is" : "are"} running low` : ""}. Restock before they run out.</span>
+          <button type="button" onClick={onViewInventory} className="shrink-0 font-semibold hover:underline">View</button>
+        </div>
+      )}
+
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-500">
+        <span className="flex items-center gap-2"><span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />Updates every 30 seconds · last {lastRefreshedAt ? lastRefreshedAt.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", second: "2-digit", timeZone: "Asia/Manila" }) : "—"}</span>
+        <span className="flex items-center gap-2">
+          <select aria-label="Sales report period" value={period} onChange={(event) => onPeriodChange(event.target.value as SalesPeriod)} className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold outline-none focus:border-blue-400 dark:border-slate-700 dark:bg-slate-900">
             <option value="today">Today</option><option value="7days">Last 7 days</option><option value="30days">Last 30 days</option>
           </select>
-          <button type="button" onClick={onRefresh} disabled={isRefreshing} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-60"><RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} /> Refresh</button>
+          <button type="button" onClick={onRefresh} disabled={isRefreshing} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"><RefreshCw size={15} className={isRefreshing ? "animate-spin" : ""} /> Refresh</button>
+        </span>
+      </div>
+
+      <div className="grid gap-5 md:grid-cols-3">
+        {topCards.map(({ label, value, detail, icon: Icon, chip }) => (
+          <div key={label} className={`${card} p-6`}>
+            <div className="flex items-start justify-between gap-3"><span className="text-base text-slate-600 dark:text-slate-300">{label}</span><span className={`grid h-10 w-10 place-items-center rounded-full ${chip}`}><Icon size={19} /></span></div>
+            <p className="mt-4 font-mono text-[34px] font-bold leading-none tracking-tight">{value}</p>
+            <p className="mt-4 text-[13px] text-slate-500">{detail}</p>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-5 grid gap-5 md:grid-cols-3">
+        <div className={`${card} p-6`}>
+          <div className="flex items-center justify-between gap-3"><span className="flex items-center gap-2 text-base text-slate-600 dark:text-slate-300"><CircleDollarSign size={17} className="text-slate-400" />Revenue trend</span><span className="text-[11px] font-bold tracking-wider text-slate-400">{periodTag}</span></div>
+          <div className="mt-4 flex items-end justify-between gap-4"><p className="font-mono text-[30px] font-bold leading-none">{money(stats.sales_total)}</p><Sparkline values={revenueTrend} className="text-blue-600 dark:text-blue-400" /></div>
+          <p className="mt-4 inline-flex rounded-md bg-slate-100 px-2 py-1 text-[13px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{revenueTrend.length > 1 ? `${revenueTrend.filter((value) => value > 0).length} of ${revenueTrend.length} ${period === "today" ? "hours" : "days"} with sales` : "Not enough data for a trend yet"}</p>
+        </div>
+        <div className={`${card} p-6`}>
+          <div className="flex items-center justify-between gap-3"><span className="flex items-center gap-2 text-base text-slate-600 dark:text-slate-300"><Boxes size={17} className="text-slate-400" />Stock on hand</span><span className="text-[11px] font-bold tracking-wider text-slate-400">NOW</span></div>
+          <p className="mt-4 font-mono text-[30px] font-bold leading-none">{stats.units_in_stock.toLocaleString("en-PH")}</p>
+          <p className="mt-4 inline-flex rounded-md bg-slate-100 px-2 py-1 text-[13px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">{stats.active_products.toLocaleString("en-PH")} products for sale</p>
+        </div>
+        <div className={`${card} p-6`}>
+          <div className="flex items-center justify-between gap-3"><span className="flex items-center gap-2 text-base text-slate-600 dark:text-slate-300"><Users size={17} className="text-slate-400" />Team</span><span className="text-[11px] font-bold tracking-wider text-slate-400">NOW</span></div>
+          <p className="mt-4 font-mono text-[30px] font-bold leading-none">{twoDigits(stats.active_employees)}</p>
+          <p className="mt-4 inline-flex rounded-md bg-slate-100 px-2 py-1 text-[13px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">Active staff accounts</p>
         </div>
       </div>
-      <div className="mb-4 flex items-center justify-between text-[11px] text-slate-400"><span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />Auto-refresh every 30 seconds</span><span>Last updated: {lastRefreshedAt ? lastRefreshedAt.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", second: "2-digit", timeZone: "Asia/Manila" }) : "—"}</span></div>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {cards.map(({ label, value, detail, icon: Icon, color }) => <div key={label} className="rounded-2xl border border-slate-100 bg-white p-4"><div className="flex items-center justify-between"><span className="text-xs font-medium text-slate-500">{label}</span><span className={`grid h-8 w-8 place-items-center rounded-lg ${color}`}><Icon size={16} /></span></div><p className="mt-3 text-2xl font-semibold tracking-tight">{value}</p><p className="mt-1 text-[10px] text-slate-400">{detail}</p></div>)}
-      </div>
-      <SalesChartView rows={salesChart} period={period} />
-      <div className="mt-6 grid gap-4 xl:grid-cols-2">
-        <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Low stock</h2><p className="mt-1 text-xs text-slate-400">Products with 5 or fewer units</p></div><button type="button" onClick={onViewInventory} className="text-xs font-semibold text-blue-600 hover:text-blue-700">Manage inventory <ArrowRight size={13} className="ml-1 inline" /></button></div>
-          {lowStockProducts.length ? <div className="divide-y divide-slate-100">{lowStockProducts.slice(0, 5).map((product) => <div key={product.id} className="flex items-center justify-between gap-3 px-5 py-3"><div className="flex min-w-0 items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><div className="min-w-0"><p className="truncate text-xs font-semibold">{product.name}</p><p className="mt-0.5 text-[10px] text-slate-400">{product.category}</p></div></div><span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-semibold text-amber-700">{product.stock} left</span></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No products need restocking.</div>}
+
+      <div className="mt-7 grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_400px]">
+        <div className="min-w-0 space-y-6">
+          <SalesChartView rows={salesChart} period={period} />
+          <div className={`${card} overflow-hidden`}>
+            <div className="flex items-center justify-between gap-3 px-7 pb-4 pt-6">
+              <div><h2 className="flex items-center gap-2 text-[22px] font-semibold">Recent sales <span className="rounded-md bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-500 dark:bg-slate-800">{orders.length}</span></h2><p className="mt-1 text-base text-slate-500">The latest transactions at your store.</p></div>
+              <button type="button" onClick={onViewOrders} className="shrink-0 text-[15px] font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400">All orders</button>
+            </div>
+            {orders.length ? (
+              <div className="divide-y divide-slate-100 border-t border-slate-100 dark:divide-slate-800 dark:border-slate-800">
+                {orders.slice(0, 6).map((order) => (
+                  <div key={order.id} className="flex items-center justify-between gap-4 px-7 py-3.5">
+                    <div className="min-w-0"><p className="font-mono text-sm font-semibold">{order.id}</p><p className="mt-0.5 text-[13px] text-slate-500">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName}{order.status === "voided" ? " · voided" : ""}</p></div>
+                    <p className="shrink-0 font-mono text-[15px] font-semibold">{money(order.total)}</p>
+                  </div>
+                ))}
+              </div>
+            ) : <p className="border-t border-slate-100 px-7 py-10 text-center text-[15px] text-slate-500 dark:border-slate-800">No sales yet. Completed sales show up here.</p>}
+          </div>
         </div>
-        <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
-          <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Recent sales</h2><p className="mt-1 text-xs text-slate-400">Latest completed transactions</p></div><button type="button" onClick={onViewOrders} className="text-xs font-semibold text-blue-600 hover:text-blue-700">All orders <ArrowRight size={13} className="ml-1 inline" /></button></div>
-          {orders.length ? <div className="divide-y divide-slate-100">{orders.slice(0, 5).map((order) => <div key={order.id} className="flex items-center justify-between gap-3 px-5 py-3"><div><p className="text-xs font-semibold">{order.id}</p><p className="mt-0.5 text-[10px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"} · {order.time} · {order.employeeName} · {paymentMethodLabel(order.paymentMethod)}{order.isWholesale ? " · Wholesale" : ""}</p></div><p className="font-mono text-xs font-semibold">{money(order.total)}</p></div>)}</div> : <div className="px-5 py-8 text-center text-xs text-slate-400">No completed sales yet.</div>}
-        </div>
+
+        <aside className={`${card} overflow-hidden`}>
+          <div className="flex items-center justify-between gap-3 px-6 pb-4 pt-6">
+            <h2 className="flex items-center gap-2 text-[22px] font-semibold"><TriangleAlert size={20} className="text-amber-500" />Low stock</h2>
+            <button type="button" onClick={onViewInventory} className="text-[15px] font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400">Inventory</button>
+          </div>
+          {lowStockProducts.length ? (
+            <ul className="divide-y divide-slate-100 border-t border-slate-100 dark:divide-slate-800 dark:border-slate-800">
+              {lowStockProducts.slice(0, 8).map((product) => (
+                <li key={product.id} className="flex items-center justify-between gap-3 px-6 py-3.5">
+                  <span className="flex min-w-0 items-center gap-3"><ProductArtwork product={product} className="h-10 w-10 shrink-0 rounded-lg text-lg" /><span className="min-w-0"><span className="block truncate text-[15px] font-semibold">{product.name}</span><span className="block text-[13px] text-slate-500">{product.category}</span></span></span>
+                  <span className={`shrink-0 rounded-full px-2.5 py-1 font-mono text-xs font-semibold ${product.stock <= 0 ? "bg-red-50 text-red-700 dark:bg-red-950/50 dark:text-red-300" : "bg-amber-50 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300"}`}>{product.stock <= 0 ? "Out" : `${product.stock} left`}</span>
+                </li>
+              ))}
+            </ul>
+          ) : <p className="border-t border-slate-100 px-6 py-10 text-center text-[15px] text-slate-500 dark:border-slate-800">Every product has more than 5 in stock.</p>}
+        </aside>
       </div>
     </section>
   );
@@ -3514,12 +3609,12 @@ function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: Sal
   ].filter((item) => paymentFilter === "all" || paymentFilter === item.method);
 
   return (
-    <section aria-label="Sales chart" className="mt-6 overflow-hidden rounded-2xl border border-slate-100 bg-white">
+    <section aria-label="Sales chart" className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
       <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:flex-row sm:items-center">
-        <div><h2 className="text-sm font-semibold">Sales by payment method</h2><p className="mt-1 text-xs text-slate-400">{periodLabel(period)} · PHP</p></div>
+        <div><h2 className="text-xl font-semibold">Sales by payment method</h2><p className="mt-1 text-[15px] text-slate-500">{periodLabel(period)} · PHP</p></div>
         <div className="flex gap-1 rounded-lg bg-slate-50 p-1" aria-label="Filter sales chart by payment method">
           {(["all", "cash", "e_wallet", "card"] as const).map((method) => (
-            <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+            <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-lg px-3.5 py-2 text-sm font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
               {method === "all" ? "All" : paymentMethodLabel(method)}
             </button>
           ))}
@@ -3734,8 +3829,8 @@ function SyncStatusButton({ isOnline, isSyncing, waiting, failed, onClick }: { i
       : isOnline ? "text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40" : "text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800";
   const Icon = !isOnline ? CloudOff : waiting || failed || isSyncing ? CloudUpload : Cloud;
   return (
-    <button type="button" onClick={onClick} aria-label={`Sync status: ${label}`} title={label} className={`relative flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold transition ${tone}`}>
-      <Icon size={18} className={isSyncing ? "animate-pulse" : ""} />
+    <button type="button" onClick={onClick} aria-label={`Sync status: ${label}`} title={label} className={`relative flex h-12 items-center gap-1.5 rounded-xl px-3 text-sm font-semibold transition ${tone}`}>
+      <Icon size={24} className={isSyncing ? "animate-pulse" : ""} />
       {(waiting > 0 || failed > 0) && <span>{waiting + failed}</span>}
     </button>
   );
@@ -4542,19 +4637,19 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
   const pageItems = sorted.slice(currentPage * INVENTORY_PAGE_SIZE, (currentPage + 1) * INVENTORY_PAGE_SIZE);
   return (
     <section>
-      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Inventory</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Inventory</h1><p className="mt-1 text-sm text-slate-500">Keep your products and stock levels up to date.</p></div>
+      <div className="mb-8 flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
+        <PageTitle eyebrow={<><StoreName /> · Inventory</>} icon={<Store size={12} />} title="Inventory" subtitle="Keep your products and stock levels up to date." />
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={onImport} className="flex h-10 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700"><FileSpreadsheet size={16} className="text-emerald-600" /> Import products</button>
+          <button type="button" onClick={onImport} className={headerButton}><FileSpreadsheet size={16} className="text-emerald-600" /> Import products</button>
           <DropdownMenu>
-            <DropdownMenuTrigger disabled={products.length === 0} className="flex h-10 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 outline-none hover:border-blue-200 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-300 disabled:opacity-50 data-[state=open]:border-blue-200 data-[state=open]:text-blue-700"><Download size={16} /> Export <ChevronDown size={14} /></DropdownMenuTrigger>
+            <DropdownMenuTrigger disabled={products.length === 0} className="flex h-12 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-5 text-[15px] font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 outline-none hover:border-blue-200 hover:text-blue-700 focus-visible:ring-2 focus-visible:ring-blue-300 disabled:opacity-50 data-[state=open]:border-blue-200 data-[state=open]:text-blue-700"><Download size={16} /> Export <ChevronDown size={14} /></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56 rounded-xl border-slate-100 bg-white p-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900">
               <DropdownMenuLabel className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Export {products.length} products</DropdownMenuLabel>
               <DropdownMenuItem onSelect={() => exportInventoryExcel(products)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><FileSpreadsheet className="text-emerald-600" /><span><span className="block font-semibold">Excel (.xlsx)</span><span className="block text-[10px] text-slate-400">Editable; can be imported again</span></span></DropdownMenuItem>
               <DropdownMenuItem onSelect={() => exportInventoryPdf(products, storeName)} className="cursor-pointer rounded-lg text-xs focus:bg-blue-50 focus:text-blue-700 dark:focus:bg-slate-800"><Printer className="text-red-500" /><span><span className="block font-semibold">PDF report</span><span className="block text-[10px] text-slate-400">Print, or choose Save as PDF</span></span></DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><PackagePlus size={16} /> Add product</button>
+          <button type="button" onClick={onAdd} className={headerPrimaryButton}><PackagePlus size={18} /> Add product</button>
         </div>
       </div>
       {shortfalls.length > 0 && (
@@ -4573,15 +4668,15 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
           </ul>
         </div>
       )}
-      <p className="mb-4 text-xs text-slate-400">Import an Excel (.xlsx), CSV, or JSON file with Product Name, Category, Retail Price and Stock columns, plus optional Wholesale Price, Cost Price and Barcode. Use Import products to download the Excel template and preview changes before saving.</p>
+      <p className="mb-5 text-sm text-slate-500">Import an Excel (.xlsx), CSV, or JSON file with Product Name, Category, Retail Price and Stock columns, plus optional Wholesale Price, Cost Price and Barcode. Use Import products to download the Excel template and preview changes before saving.</p>
       <div className="mb-5 grid gap-3 sm:grid-cols-3">
-        <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Total products</p><p className="mt-2 text-2xl font-semibold">{products.length}</p></div>
-        <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Units in stock</p><p className="mt-2 text-2xl font-semibold">{products.reduce((sum, product) => sum + product.stock, 0)}</p></div>
-        <div className="rounded-2xl border border-slate-100 bg-white p-4"><p className="text-xs text-slate-500">Running low</p><p className="mt-2 text-2xl font-semibold">{lowStock}<span className="ml-2 text-xs font-medium text-amber-600">needs attention</span></p></div>
+        <div className="rounded-2xl border border-slate-100 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"><p className="text-base text-slate-600 dark:text-slate-300">Total products</p><p className="mt-3 font-mono text-[34px] font-bold leading-none">{products.length}</p></div>
+        <div className="rounded-2xl border border-slate-100 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"><p className="text-base text-slate-600 dark:text-slate-300">Units in stock</p><p className="mt-3 font-mono text-[34px] font-bold leading-none">{products.reduce((sum, product) => sum + product.stock, 0)}</p></div>
+        <div className="rounded-2xl border border-slate-100 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"><p className="text-base text-slate-600 dark:text-slate-300">Running low</p><p className="mt-3 font-mono text-[34px] font-bold leading-none">{lowStock}<span className="ml-3 font-sans text-sm font-medium text-amber-600">needs attention</span></p></div>
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length.toLocaleString("en-PH")} items in your catalog{term && <> · {matching.length.toLocaleString("en-PH")} match</>}</p></div><label className="flex h-9 w-full max-w-[260px] items-center gap-2 rounded-lg border border-slate-200 px-3 focus-within:border-blue-400 dark:border-slate-700"><Search size={14} className="shrink-0 text-slate-400" /><input value={query} onChange={(event) => { setQuery(event.currentTarget.value); setPage(0); }} placeholder="Search name, category or barcode" aria-label="Search products" className="w-full min-w-0 bg-transparent text-xs outline-none placeholder:text-slate-400" /></label></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3" aria-sort={sort.key === "name" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("name", "Product")}</th><th className="px-4 py-3" aria-sort={sort.key === "category" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("category", "Category")}</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3" aria-sort={sort.key === "price" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("price", "Retail price")}</th><th className="px-4 py-3" aria-sort={sort.key === "stock" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("stock", "Stock")}</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{pageItems.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
+        <div className="flex items-center justify-between gap-4 border-b border-slate-100 px-7 py-5 dark:border-slate-800"><div><h2 className="text-xl font-semibold">All products</h2><p className="mt-1 text-[15px] text-slate-500">{products.length.toLocaleString("en-PH")} items in your catalog{term && <> · {matching.length.toLocaleString("en-PH")} match</>}</p></div><label className="flex h-11 w-full max-w-[320px] items-center gap-2.5 rounded-xl border border-slate-200 px-4 focus-within:border-blue-400 dark:border-slate-700"><Search size={14} className="shrink-0 text-slate-400" /><input value={query} onChange={(event) => { setQuery(event.currentTarget.value); setPage(0); }} placeholder="Search name, category or barcode" aria-label="Search products" className="w-full min-w-0 bg-transparent text-[15px] outline-none placeholder:text-slate-400" /></label></div>
+        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="bg-slate-50/70 text-xs font-semibold uppercase tracking-wider text-slate-400 dark:bg-slate-800/60"><tr><th className="px-5 py-3" aria-sort={sort.key === "name" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("name", "Product")}</th><th className="px-4 py-3" aria-sort={sort.key === "category" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("category", "Category")}</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3" aria-sort={sort.key === "price" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("price", "Retail price")}</th><th className="px-4 py-3" aria-sort={sort.key === "stock" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("stock", "Stock")}</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{pageItems.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
                 <DropdownMenu>
                   <DropdownMenuTrigger aria-label={`Actions for ${product.name}`} title="Actions" className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-300 data-[state=open]:bg-slate-100 data-[state=open]:text-slate-700 dark:hover:bg-slate-800 dark:data-[state=open]:bg-slate-800">
                     <EllipsisVertical size={16} />
@@ -4619,12 +4714,12 @@ function EmployeeView({ employees, onAdd, onRemove, onSetPassword }: {
 }) {
   return (
     <section>
-      <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Employees</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Team members</h1><p className="mt-1 text-sm text-slate-500">Create and manage secure employee sign-in accounts.</p></div>
-        <button type="button" onClick={onAdd} className="flex h-10 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-md shadow-blue-600/15 hover:bg-blue-700"><UserPlus size={16} /> Add employee</button>
+      <div className="mb-8 flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
+        <PageTitle eyebrow={<><StoreName /> · Employees</>} icon={<Store size={12} />} title="Team members" subtitle="Create and manage secure employee sign-in accounts." />
+        <button type="button" onClick={onAdd} className={headerPrimaryButton}><UserPlus size={18} /> Add employee</button>
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
-        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">Employee accounts</h2><p className="mt-1 text-xs text-slate-400">{employees.length} active employee{employees.length === 1 ? "" : "s"}</p></div><Users size={18} className="text-slate-400" /></div>
+        <div className="flex items-center justify-between gap-4 border-b border-slate-100 px-7 py-5 dark:border-slate-800"><div><h2 className="text-xl font-semibold">Employee accounts</h2><p className="mt-1 text-[15px] text-slate-500">{employees.length} active employee{employees.length === 1 ? "" : "s"}</p></div><Users size={18} className="text-slate-400" /></div>
         {employees.length > 0 ? <div className="divide-y divide-slate-100">{employees.map((employee) => <div key={employee.id} className="flex items-center justify-between gap-3 px-5 py-4"><div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-blue-50 text-sm font-bold text-blue-700">{employee.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div><div className="min-w-0"><p className="truncate text-sm font-semibold">{employee.full_name}</p><p className="mt-1 truncate text-xs text-slate-400">{employee.email}</p></div></div><div className="flex items-center gap-3"><span className="hidden rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-700 sm:inline">Employee</span><button type="button" onClick={() => onSetPassword(employee)} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-2 text-xs font-semibold text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-800"><KeyRound size={14} /> Set password</button><button type="button" aria-label={`Remove ${employee.full_name}`} title="Remove employee" onClick={() => onRemove(employee)} className="rounded-lg p-2 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={15} /></button></div></div>)}</div> : <div className="grid min-h-48 place-items-center text-center"><div><Users size={26} className="mx-auto text-slate-300" /><p className="mt-3 text-sm font-semibold">No employees yet</p><p className="mt-1 text-xs text-slate-400">Create accounts for the people on your team.</p></div></div>}
       </div>
       <p className="mt-4 text-xs text-slate-400">Admins create employee passwords and can set a new one any time with Set password. Share passwords securely. Employee accounts cannot access inventory or team settings.</p>
@@ -4657,21 +4752,21 @@ function AccountView({
 }) {
   return (
     <section className="mx-auto max-w-3xl">
-      <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Account</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Account settings</h1><p className="mt-1 text-sm text-slate-500">Manage your sign-in details and store history.</p></div>
+      <div className="mb-8"><PageTitle eyebrow={<><StoreName /> · Account</>} icon={<Store size={12} />} title="Account settings" subtitle="Manage your sign-in details and store history." /></div>
       <div className="space-y-5">
         <form onSubmit={onUpdateName} className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
-          <div className="mb-4"><h2 className="text-sm font-semibold">Account name</h2><p className="mt-1 text-xs leading-5 text-slate-500">This name appears in the POS workspace and account profile.</p></div>
+          <div className="mb-5"><h2 className="text-xl font-semibold">Account name</h2><p className="mt-1 text-[15px] leading-6 text-slate-500">This name appears in the POS workspace and account profile.</p></div>
           <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">Full name<input required maxLength={100} name="fullName" defaultValue={name} autoComplete="name" className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
           <button type="submit" disabled={isProcessing} className="mt-4 h-10 rounded-lg bg-blue-600 px-4 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isProcessing ? "Saving…" : "Update name"}</button>
         </form>
         <form onSubmit={onUpdateEmail} className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
-          <div className="mb-4"><h2 className="text-sm font-semibold">Email address</h2><p className="mt-1 text-xs leading-5 text-slate-500">A confirmation email may be required before your new address becomes active.</p></div>
+          <div className="mb-5"><h2 className="text-xl font-semibold">Email address</h2><p className="mt-1 text-[15px] leading-6 text-slate-500">A confirmation email may be required before your new address becomes active.</p></div>
           <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">Current email<input disabled value={email} className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300" /></label>
           <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">New email address<input required type="email" name="email" autoComplete="email" placeholder="you@yourstore.com" className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
           <button type="submit" disabled={isProcessing} className="mt-4 h-10 rounded-lg bg-blue-600 px-4 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isProcessing ? "Saving…" : "Update email"}</button>
         </form>
         <form onSubmit={onUpdatePassword} className="rounded-2xl border border-slate-100 bg-white p-5 dark:border-slate-800 dark:bg-slate-900 sm:p-6">
-          <div className="mb-4"><h2 className="text-sm font-semibold">Change password</h2><p className="mt-1 text-xs leading-5 text-slate-500">Use at least 8 characters. Your password is managed securely by Supabase Auth.</p></div>
+          <div className="mb-5"><h2 className="text-xl font-semibold">Change password</h2><p className="mt-1 text-[15px] leading-6 text-slate-500">Use at least 8 characters. Your password is managed securely by Supabase Auth.</p></div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">New password<input required minLength={8} type="password" name="password" autoComplete="new-password" className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
             <label className="block text-xs font-medium text-slate-600 dark:text-slate-300">Confirm new password<input required minLength={8} type="password" name="confirmPassword" autoComplete="new-password" className="mt-1.5 h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50 dark:border-slate-700 dark:bg-slate-950" /></label>
@@ -4737,17 +4832,17 @@ function OrdersView({ orders, isAdmin, userName, connected, onPrint, onVoid, onR
 
   return (
     <section>
-      <div className="mb-6"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><Store size={14} /> <StoreName /> <span>/</span> <span className="text-blue-600">Orders</span></div><h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Recent orders</h1><p className="mt-1 text-sm text-slate-500">A quick look at your latest transactions.</p></div>
+      <div className="mb-8"><PageTitle eyebrow={<><StoreName /> · Orders</>} icon={<Store size={12} />} title="Recent orders" subtitle="A quick look at your latest transactions." /></div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800 sm:flex-row sm:items-center">
-          <div><h2 className="text-sm font-semibold">Order history</h2><p className="mt-1 text-xs text-slate-400">Showing {visibleOrders.length} of {orders.length} recent transactions</p></div>
+          <div><h2 className="text-xl font-semibold">Order history</h2><p className="mt-1 text-[15px] text-slate-500">Showing {visibleOrders.length} of {orders.length} recent transactions</p></div>
           <div className="flex gap-1 rounded-lg bg-slate-50 p-1 dark:bg-slate-800" aria-label="Filter orders by payment method">
-            {(["all", "cash", "e_wallet", "card"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-md px-3 py-1.5 text-[11px] font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm dark:bg-slate-700 dark:text-blue-300" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : paymentMethodLabel(method)}</button>)}
+            {(["all", "cash", "e_wallet", "card"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-lg px-3.5 py-2 text-sm font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm dark:bg-slate-700 dark:text-blue-300" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : paymentMethodLabel(method)}</button>)}
           </div>
         </div>
         {visibleOrders.length > 0 ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-xs">
+            <table className="w-full min-w-[720px] text-left text-sm">
               <thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:bg-slate-800/60">
                 <tr><th className="px-5 py-3">Status</th><th className="px-4 py-3">Date &amp; Time</th><th className="px-4 py-3">Cashier</th><th className="px-4 py-3">Payment Method</th><th className="px-4 py-3 text-right">Total</th><th className="px-5 py-3 text-right">Actions</th></tr>
               </thead>

@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { FileSpreadsheet, Printer, RefreshCw } from "lucide-react";
+import { BarChart3, FileSpreadsheet, Printer, RefreshCw } from "lucide-react";
+import { headerButton, headerPrimaryButton, PageTitle } from "@/components/page-header";
+import { StoreName } from "@/components/store-name";
 import { SmoothLineChart } from "@/components/smooth-line-chart";
 
 type ReportPeriod = "today" | "7days" | "30days";
@@ -121,16 +123,12 @@ ${worksheet("Breakdown", breakdownRows)}
 
   return (
     <section>
-        <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-400"><span>Reports</span><span>/</span><span className="text-blue-600">Analytics</span></div>
-            <h1 className="text-2xl font-semibold tracking-tight sm:text-[28px]">Analytics &amp; Reports</h1>
-            <p className="mt-1 text-sm text-slate-500">Revenue and estimated profit · PHP · Asia/Manila</p>
-          </div>
-          <div className="analytics-no-print flex flex-wrap items-center gap-2">
-            <button type="button" onClick={onRefresh} disabled={isLoading} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900"><RefreshCw size={14} className={isLoading ? "animate-spin" : ""} /> Refresh</button>
-            <button type="button" onClick={exportPdf} disabled={isLoading || rows.length === 0} className="flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 hover:border-blue-200 hover:text-blue-700 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900"><Printer size={14} /> Export PDF</button>
-            <button type="button" onClick={exportExcel} disabled={isLoading || rows.length === 0} className="flex h-10 items-center gap-2 rounded-xl bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-50"><FileSpreadsheet size={14} /> Export Excel</button>
+        <header className="mb-8 flex flex-col justify-between gap-5 lg:flex-row lg:items-end">
+          <PageTitle eyebrow={<><StoreName /> · Reports</>} icon={<BarChart3 size={12} />} title="Analytics & Reports" subtitle="Revenue and estimated profit · PHP · Asia/Manila" />
+          <div className="analytics-no-print flex flex-wrap items-center gap-3">
+            <button type="button" onClick={onRefresh} disabled={isLoading} className={headerButton}><RefreshCw size={14} className={isLoading ? "animate-spin" : ""} /> Refresh</button>
+            <button type="button" onClick={exportPdf} disabled={isLoading || rows.length === 0} className={headerButton}><Printer size={14} /> Export PDF</button>
+            <button type="button" onClick={exportExcel} disabled={isLoading || rows.length === 0} className={headerPrimaryButton}><FileSpreadsheet size={14} /> Export Excel</button>
           </div>
         </header>
 
