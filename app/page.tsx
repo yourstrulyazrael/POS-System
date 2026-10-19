@@ -159,6 +159,7 @@ type SalesPeriod = "today" | "7days" | "30days";
 type Page = "dashboard" | "analytics" | "pos" | "inventory" | "orders" | "shifts" | "employees" | "account";
 
 const POS_DISPLAY_LIMIT = 200;
+const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION ?? "";
 const INVENTORY_PAGE_SIZE = 100;
 
 const money = (amount: number) =>
@@ -573,6 +574,9 @@ export default function Home() {
   // The order line that +/−/Delete act on, highlighted and kept in view: the
   // one last added or touched.
   const [selectedLine, setSelectedLine] = useState<string | null>(null);
+  // The order on screen is kept on this computer per user, so a restart or
+  // crash doesn't lose it.
+  const restoredCartFor = useRef<string | null>(null);
   // Ctrl+Z takes back recent additions, newest first.
   const additionsRef = useRef<{ key: string; custom: boolean; quantity: number }[]>([]);
   const [lastSale, setLastSale] = useState<Order | null>(null);
@@ -597,6 +601,10 @@ export default function Home() {
   const [accountName, setAccountName] = useState("");
   const [salesResetConfirmation, setSalesResetConfirmation] = useState("");
   const [notice, setNotice] = useState("");
+  // An action offered in the notice (e.g. Undo), for that notice only.
+  const [noticeAction, setNoticeAction] = useState<{ notice: string; label: string; run: () => void } | null>(null);
+  // Shown after a sale: what was paid and the change to hand back.
+  const [completedSale, setCompletedSale] = useState<{ label: string; total: number; paid: number | null; change: number | null; method: PaymentMethod; offline: boolean } | null>(null);
   const [authError, setAuthError] = useState("");
   const [adminCreated, setAdminCreated] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
@@ -613,9 +621,6 @@ export default function Home() {
   const [storeDetails, setStoreDetails] = useState<StoreDetails>(defaultStoreDetails);
   // The store's name for branding and headings (components/store-name.tsx).
   const brandName = (signedIn ? storeDetails.storeName.trim() : "") || storeConnection?.name.trim() || "Point of sale";
-  useEffect(() => {
-    document.title = brandName === "Point of sale" ? "Point of sale" : `${brandName} · Point of sale`;
-  }, [brandName]);
   const [hardware, setHardware] = useState<HardwareSettings>(defaultHardwareSettings);
   const [cashSession, setCashSession] = useState<CashSession | null>(null);
   const [showOpenDrawer, setShowOpenDrawer] = useState(false);
@@ -835,9 +840,10 @@ export default function Home() {
   const noticeIsSuccess = /successfully|\badded\b|\bAdded\b|updated|removed|created|cleared|copied|synced|saved offline/i.test(notice) && !/couldn|could not|unable|but /i.test(notice);
   useEffect(() => {
     if (!notice || !noticeIsSuccess || showCheckoutDialog) return;
-    const timer = window.setTimeout(() => setNotice((current) => (current === notice ? "" : current)), 5000);
+    // A notice with Undo stays a little longer, so there's time to use it.
+    const timer = window.setTimeout(() => setNotice((current) => (current === notice ? "" : current)), noticeAction?.notice === notice ? 8000 : 5000);
     return () => window.clearTimeout(timer);
-  }, [notice, noticeIsSuccess, showCheckoutDialog]);
+  }, [notice, noticeIsSuccess, showCheckoutDialog, noticeAction]);
 
   // The top bar grows with its banners (offline, reconnect, update ready).
   // Publish its real height so the sticky current order always fits below it.
@@ -1212,6 +1218,24 @@ export default function Home() {
     }
   }
 
+  function notifyWithUndo(message: string, undo: () => void) {
+    setNotice(message);
+    setNoticeAction({ notice: message, label: "Undo", run: undo });
+  }
+
+  // Clear the order, with Undo in case it was a slip.
+  function clearOrderWithUndo() {
+    if (!itemCount) return;
+    const snapshot = { cart, customItems, wholesaleMode };
+    clearOrder();
+    notifyWithUndo("Order cleared.", () => {
+      setCart(snapshot.cart);
+      setCustomItems(snapshot.customItems);
+      setWholesaleMode(snapshot.wholesaleMode);
+      setNotice("Order restored.");
+    });
+  }
+
   function rememberAddition(key: string, custom: boolean, quantity: number) {
     additionsRef.current = [...additionsRef.current.slice(-49), { key, custom, quantity }];
     setSelectedLine(key);
@@ -1338,15 +1362,37 @@ export default function Home() {
     { page: "account", label: "Account", icon: UserRound },
   ];
 
+  // A form someone has typed into asks before it's closed.
+  function okToDiscard() {
+    return !document.querySelector("form[data-dirty]") || window.confirm("Discard the changes you entered?");
+  }
+  const markDirty = (event: FormEvent<HTMLFormElement>) => { event.currentTarget.dataset.dirty = "1"; };
+  function closeAddProduct() {
+    if (!okToDiscard()) return;
+    setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto");
+  }
+  function closeEditPrices() {
+    if (okToDiscard()) setEditingProductPrices(null);
+  }
+  function closeRestock() {
+    if (okToDiscard()) setRestockProduct(null);
+  }
+
+  useEffect(() => {
+    const page = signedIn ? navItems.find((item) => item.page === currentView)?.label : "Sign in";
+    document.title = [page, brandName === "Point of sale" ? "" : brandName].filter(Boolean).join(" · ") || "Point of sale";
+  });
+
   function closeTopDialog() {
     if (showHelpCenter) setShowHelpCenter(false);
     else if (isLoading) return false;
     else if (showCheckoutDialog) { setShowCheckoutDialog(false); setNotice(""); }
-    else if (showAddProduct) { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }
-    else if (editingProductPrices) setEditingProductPrices(null);
+    else if (completedSale) setCompletedSale(null);
+    else if (showAddProduct) closeAddProduct();
+    else if (editingProductPrices) closeEditPrices();
     else if (editingProductImage) { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }
     else if (showAddEmployee) setShowAddEmployee(false);
-    else if (restockProduct) setRestockProduct(null);
+    else if (restockProduct) closeRestock();
     else if (quickAdd) setQuickAdd(null);
     else if (showImport) { if (!isImporting) setShowImport(false); }
     else if (confirmAction) setConfirmAction(null);
@@ -1369,7 +1415,7 @@ export default function Home() {
     if (!signedIn || event.defaultPrevented || event.isComposing) return;
     const target = event.target as HTMLElement | null;
     const inTextField = !!target?.closest("input, textarea, select, [contenteditable='true']");
-    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport || !!confirmAction || !!passwordEmployee || showSyncPanel || showOpenDrawer || showCashCount || !!voidTarget || !!refundTarget || showSuspend || showRecall;
+    const dialogOpen = showHelpCenter || showCheckoutDialog || showAddProduct || !!editingProductPrices || !!editingProductImage || showAddEmployee || !!restockProduct || !!quickAdd || showImport || !!confirmAction || !!passwordEmployee || showSyncPanel || showOpenDrawer || showCashCount || !!voidTarget || !!refundTarget || showSuspend || showRecall || !!completedSale;
     const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
 
     if (event.key === "Escape") {
@@ -1478,7 +1524,7 @@ export default function Home() {
       if (itemCount && !isLoading) { setNotice(""); setShowCheckoutDialog(true); }
     } else if (event.key === "F9") {
       event.preventDefault();
-      if (itemCount) { clearOrder(); setNotice("Order cleared."); }
+      clearOrderWithUndo();
     } else if (event.key === "F3") {
       event.preventDefault();
       openQuickAdd();
@@ -1534,6 +1580,39 @@ export default function Home() {
     listSuspendedOrders().then((orders) => { if (!cancelled) setSuspendedOrders(orders); }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [signedIn]);
+
+  useEffect(() => {
+    const storageKey = userId ? `clover-pos-cart:${userId}` : null;
+    if (!storageKey || restoredCartFor.current === storageKey) return;
+    restoredCartFor.current = storageKey;
+    try {
+      const saved = JSON.parse(window.localStorage.getItem(storageKey) ?? "null") as { cart?: Record<string, number>; customItems?: CustomItem[]; wholesaleMode?: boolean } | null;
+      if (saved?.cart && typeof saved.cart === "object") setCart(saved.cart);
+      if (Array.isArray(saved?.customItems)) setCustomItems(saved.customItems);
+      if (typeof saved?.wholesaleMode === "boolean") setWholesaleMode(saved.wholesaleMode);
+    } catch {
+      // Unreadable: start with an empty order.
+    }
+  }, [userId]);
+  useEffect(() => {
+    const storageKey = userId ? `clover-pos-cart:${userId}` : null;
+    if (!storageKey || restoredCartFor.current !== storageKey) return;
+    try {
+      if (Object.keys(cart).length || customItems.length) window.localStorage.setItem(storageKey, JSON.stringify({ cart, customItems, wholesaleMode }));
+      else window.localStorage.removeItem(storageKey);
+    } catch {
+      // Storage full or blocked: the order still works for this session.
+    }
+  }, [cart, customItems, wholesaleMode, userId]);
+  // Drop restored lines for products that are no longer sold.
+  useEffect(() => {
+    if (!products.length) return;
+    const known = new Set(products.map((product) => product.id));
+    setCart((current) => {
+      const kept = Object.fromEntries(Object.entries(current).filter(([key]) => known.has(parseCartKey(key).productId)));
+      return Object.keys(kept).length === Object.keys(current).length ? current : kept;
+    });
+  }, [products]);
 
   const shortcutHandlerRef = useRef(handleShortcut);
   useEffect(() => {
@@ -1647,6 +1726,8 @@ export default function Home() {
       const recordedTotal = "total" in data ? Number(data.total) : total;
       const totalMismatch = Number.isFinite(recordedTotal) && Math.abs(recordedTotal - total) >= 0.01;
       void afterSale({ ...sale, receiptNumber, ...(totalMismatch ? { total: recordedTotal } : {}) }, false, printThisSale);
+      const finalTotal = totalMismatch ? recordedTotal : total;
+      setCompletedSale({ label: newOrderId, total: finalTotal, paid: receivedAmount, change: receivedAmount !== null ? Math.max(0, Math.round((receivedAmount - finalTotal) * 100) / 100) : null, method: paymentMethod, offline: false });
       const wasWholesale = sale.wholesale;
       clearOrder();
       setShowCheckoutDialog(false);
@@ -1956,6 +2037,7 @@ export default function Home() {
     setCashReceived("");
     setPaymentReferenceLast4("");
     setNotice(`Sale #${sale.clientOrderId.slice(0, 8)} saved offline on this computer. It will sync automatically when the connection is back.`);
+    setCompletedSale({ label: `#${sale.clientOrderId.slice(0, 8)}`, total: sale.total, paid: sale.cashReceived, change: sale.cashReceived !== null ? Math.max(0, Math.round((sale.cashReceived - sale.total) * 100) / 100) : null, method: sale.paymentMethod, offline: true });
     void afterSale(sale, true, print);
   }
 
@@ -2190,7 +2272,14 @@ export default function Home() {
           delete next[cartKey(product.id, true)];
           return next;
         });
-        setNotice(`${product.name} removed from inventory.`);
+        notifyWithUndo(`${product.name} removed from inventory.`, () => {
+          void (async () => {
+            const { error: undoError } = await createClient().from("products").update({ active: true }).eq("id", product.id);
+            if (undoError) { setNotice(productSaveError(undoError, `Couldn’t bring back ${product.name}.`)); return; }
+            setNotice(`${product.name} is back in inventory.`);
+            try { await refreshWorkspace(); } catch { /* the next refresh shows it */ }
+          })();
+        });
         try {
           await refreshWorkspace();
         } catch (error) {
@@ -2693,7 +2782,7 @@ export default function Home() {
   }
 
   if (checkingAuth) {
-    return <main className="grid min-h-screen place-items-center bg-[#f4f8ff] text-sm text-slate-500 dark:bg-slate-950"><span className="animate-pulse">Loading your store…</span></main>;
+    return <LoadingSkeleton />;
   }
 
   if (!signedIn) {
@@ -2789,7 +2878,7 @@ export default function Home() {
                 <span>You stay signed in on this computer until you sign out. Administrators create employee accounts from Employees.</span>
               </div>
               <p className="mt-5 text-center text-sm text-slate-500">Setting up a new store? <Link href="/setup-admin" className="font-semibold text-blue-700 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">Create the first admin</Link></p>
-              <p className="mt-8 text-center text-xs text-slate-400">Secure checkout starts here · {brandName}</p>
+              <p className="mt-8 text-center text-xs text-slate-400">Secure checkout starts here · {brandName}{APP_VERSION && <> · v{APP_VERSION}</>}</p>
             </div>
           </section>
         </div>
@@ -2859,7 +2948,10 @@ export default function Home() {
             {notice && (
               <div role="status" className={`mb-5 flex items-center justify-between rounded-xl border px-4 py-3 text-sm ${noticeIsSuccess ? "border-emerald-100 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-200" : "border-blue-100 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-200"}`}>
                 <span className="flex items-center gap-2">{noticeIsSuccess ? <Check size={16} className="shrink-0" /> : <Info size={16} className="shrink-0" />}{notice}</span>
-                <button type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={16} /></button>
+                <span className="flex shrink-0 items-center gap-2">
+                  {noticeAction?.notice === notice && <button type="button" onClick={() => { const action = noticeAction; setNoticeAction(null); setNotice(""); action.run(); }} className="rounded-lg border border-current px-2.5 py-1 text-xs font-semibold hover:bg-white/60 dark:hover:bg-white/10">{noticeAction.label}</button>}
+                  <button type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={16} /></button>
+                </span>
               </div>
             )}
             {editingProductImage && (
@@ -2989,7 +3081,7 @@ export default function Home() {
                     onChange={changeQuantity}
                     onCheckout={() => { setNotice(""); setShowMobileCart(false); setShowCheckoutDialog(true); }}
                     isProcessing={isLoading}
-                    onClear={clearOrder}
+                    onClear={clearOrderWithUndo}
                     onOpenDrawer={() => void openDrawer(true)}
                     onSuspend={() => setShowSuspend(true)}
                     onRecall={() => setShowRecall(true)}
@@ -3123,7 +3215,7 @@ export default function Home() {
               </div>
             )}
           </div>
-          <footer className="px-4 pb-6 text-center text-[10px] text-slate-400 sm:px-7 xl:px-9">{brandName} · Point of sale</footer>
+          <footer className="px-4 pb-6 text-center text-[10px] text-slate-400 sm:px-7 xl:px-9">{brandName} · Point of sale{APP_VERSION && <> · v{APP_VERSION}</>}</footer>
         </div>
       </div>
 
@@ -3182,13 +3274,13 @@ export default function Home() {
         </div>
       )}
       {showAddProduct && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); } }}>
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) closeAddProduct(); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="add-product-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <div className="mb-5 flex items-start justify-between">
               <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="add-product-title" className="mt-1 text-xl font-semibold">Add a product</h2></div>
-              <button type="button" aria-label="Close dialog" onClick={() => { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
+              <button type="button" aria-label="Close dialog" onClick={closeAddProduct} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
             </div>
-            <form onSubmit={addProduct} className="max-h-[80vh] space-y-4 overflow-y-auto pr-1">
+            <form onSubmit={addProduct} onInput={markDirty} className="max-h-[80vh] space-y-4 overflow-y-auto pr-1">
               <label className="block text-sm font-medium text-slate-700">Product name<input required name="name" placeholder="e.g. Sardines (155 g)" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <div className="grid grid-cols-2 gap-3">
                 <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" placeholder="18.00" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
@@ -3205,25 +3297,25 @@ export default function Home() {
                 onImageChange={setSelectedProductImage}
                 optional
               />
-              <div className="flex gap-3 pt-2"><button type="button" onClick={() => { setShowAddProduct(false); setSelectedProductImage(null); setSelectedProductIcon("auto"); }} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button><button type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add product <Kbd>Enter</Kbd></button></div>
+              <div className="flex gap-3 pt-2"><button type="button" onClick={closeAddProduct} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button><button type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Add product <Kbd>Enter</Kbd></button></div>
             </form>
           </div>
         </div>
       )}
       {editingProductPrices && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) setEditingProductPrices(null); }}>
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget && !isLoading) closeEditPrices(); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="edit-product-prices-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
             <div className="mb-5 flex items-start justify-between">
               <div><p className="text-xs font-semibold text-blue-600">INVENTORY</p><h2 id="edit-product-prices-title" className="mt-1 text-xl font-semibold">Edit product details</h2><p className="mt-1 text-sm text-slate-500">{editingProductPrices.name}</p></div>
-              <button type="button" aria-label="Close price editor" disabled={isLoading} onClick={() => setEditingProductPrices(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
+              <button type="button" aria-label="Close price editor" disabled={isLoading} onClick={closeEditPrices} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50 disabled:opacity-50"><X size={18} /></button>
             </div>
-            <form onSubmit={saveProductPrices} className="space-y-4">
+            <form onSubmit={saveProductPrices} onInput={markDirty} className="space-y-4">
               <label className="block text-sm font-medium text-slate-700">Cost price (₱)<input required name="cost_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.costPriceKnown ? editingProductPrices.costPrice : ""} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Wholesale price (₱) <span className="font-normal text-slate-400">optional</span><input name="wholesale_price" type="number" min="0" step="0.01" defaultValue={editingProductPrices.wholesalePrice > 0 ? editingProductPrices.wholesalePrice : ""} placeholder="Blank = retail only" title="Leave blank for products not sold wholesale, like single sachets" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Retail price (₱)<input required name="price" type="number" min="0.01" step="0.01" defaultValue={editingProductPrices.price} className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <BarcodeField defaultValue={editingProductPrices.barcode ?? ""} />
               <CategoryField categories={productCategories} defaultValue={editingProductPrices.category} />
-              <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={() => setEditingProductPrices(null)} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel <Kbd>Esc</Kbd></button><button disabled={isLoading} type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : <>Save <Kbd>Enter</Kbd></>}</button></div>
+              <div className="flex gap-3 pt-2"><button type="button" disabled={isLoading} onClick={closeEditPrices} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Cancel <Kbd>Esc</Kbd></button><button disabled={isLoading} type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Saving…" : <>Save <Kbd>Enter</Kbd></>}</button></div>
             </form>
           </div>
         </div>
@@ -3241,7 +3333,13 @@ export default function Home() {
           </div>
         </div>
       )}
-      {quickAdd && <QuickAddDialog initial={quickAdd} onAdd={addCustomItem} onClose={() => setQuickAdd(null)} />}
+      {completedSale && <SaleCompleteDialog sale={completedSale} onClose={(typed) => {
+        setCompletedSale(null);
+        // Typing or scanning straight away starts the next sale.
+        if (typed) { setSearch(typed); window.setTimeout(() => searchInputRef.current?.focus(), 0); }
+        else window.setTimeout(() => searchInputRef.current?.focus(), 0);
+      }} />}
+      {quickAdd && <QuickAddDialog initial={quickAdd} onAdd={addCustomItem} onClose={() => { if (okToDiscard()) setQuickAdd(null); }} />}
       {showOpenDrawer && <OpenDrawerDialog deviceLabel={hardware.deviceLabel} onOpen={startDrawerSession} onClose={() => setShowOpenDrawer(false)} />}
       {showCashCount && cashSession && <CashCountDialog session={cashSession} onConfirm={finishDrawerSession} onClose={() => setShowCashCount(false)} onOpenDrawer={() => void openDrawer(true)} />}
       {voidTarget && <VoidDialog order={voidTarget} onConfirm={(reason, printSlip) => voidSale(voidTarget, reason, printSlip)} onClose={() => setVoidTarget(null)} />}
@@ -3265,13 +3363,13 @@ export default function Home() {
       )}
       {showImport && isAdmin && <ImportProductsDialog prepare={prepareImport} onImport={(preview, masterList) => void importProducts(preview, masterList)} onClose={() => setShowImport(false)} isImporting={isImporting} />}
       {restockProduct && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) setRestockProduct(null); }}>
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/40 p-4" onClick={(event) => { if (event.target === event.currentTarget) closeRestock(); }}>
           <div role="dialog" aria-modal="true" aria-labelledby="restock-title" className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl dark:bg-slate-900">
             <div className="mb-5 flex items-start justify-between"><div><p className="text-xs font-semibold text-blue-600">STOCK ADJUSTMENT</p><h2 id="restock-title" className="mt-1 text-xl font-semibold">Restock product</h2><p className="mt-1 text-sm text-slate-500">{restockProduct.name} · currently {restockProduct.stock} in stock</p></div><button type="button" aria-label="Close dialog" onClick={() => setRestockProduct(null)} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button></div>
-            <form onSubmit={restock} className="space-y-4">
+            <form onSubmit={restock} onInput={markDirty} className="space-y-4">
               <label className="block text-sm font-medium text-slate-700">Units received<input required autoFocus name="quantity" type="number" min="1" max="1000000" step="1" placeholder="e.g. 24" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
               <label className="block text-sm font-medium text-slate-700">Note <span className="font-normal text-slate-400">(optional)</span><input maxLength={200} name="note" placeholder="Supplier delivery, invoice number…" className="mt-1.5 h-11 w-full rounded-lg border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-50" /></label>
-              <div className="flex gap-3 pt-2"><button type="button" onClick={() => setRestockProduct(null)} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button><button disabled={isLoading} type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Updating…" : <>Add to stock <Kbd>Enter</Kbd></>}</button></div>
+              <div className="flex gap-3 pt-2"><button type="button" onClick={closeRestock} aria-keyshortcuts="Escape" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg border border-slate-200 text-sm font-semibold text-slate-600 hover:bg-slate-50">Cancel <Kbd>Esc</Kbd></button><button disabled={isLoading} type="submit" aria-keyshortcuts="Enter" className="flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">{isLoading ? "Updating…" : <>Add to stock <Kbd>Enter</Kbd></>}</button></div>
             </form>
           </div>
         </div>
@@ -3710,6 +3808,65 @@ function SyncPanel({ sales, isOnline, isSyncing, currentUserId, isAdmin, onSync,
 
 // Confirmation for destructive actions. Cancel has focus first, so a stray
 // Enter never deletes anything; Esc cancels.
+// After a sale: the change to hand back, large. Enter, Esc or a click closes
+// it; typing or scanning closes it and starts the next sale.
+function SaleCompleteDialog({ sale, onClose }: {
+  sale: { label: string; total: number; paid: number | null; change: number | null; method: PaymentMethod; offline: boolean };
+  onClose: (typed?: string) => void;
+}) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.ctrlKey || event.altKey || event.metaKey) return;
+      if (event.key === "Enter" || event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
+      else if (event.key.length === 1 && event.key !== " ") { event.preventDefault(); event.stopPropagation(); onClose(event.key); }
+    }
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-4" onClick={() => onClose()}>
+      <section role="dialog" aria-modal="true" aria-labelledby="sale-complete-title" className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-2xl dark:bg-slate-900" onClick={(event) => event.stopPropagation()}>
+        <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-300"><Check size={24} /></div>
+        <h2 id="sale-complete-title" className="mt-3 text-lg font-semibold">Sale complete</h2>
+        <p className="mt-0.5 font-mono text-xs text-slate-500">{sale.label}{sale.offline ? " · saved offline" : ""}</p>
+        <dl className="mt-5 space-y-1.5 text-left text-sm">
+          <div className="flex justify-between"><dt className="text-slate-500">Total</dt><dd className="font-mono font-semibold">{money(sale.total)}</dd></div>
+          <div className="flex justify-between"><dt className="text-slate-500">{sale.method === "cash" ? "Cash received" : `Paid by ${paymentMethodLabel(sale.method)}`}</dt><dd className="font-mono font-semibold">{money(sale.paid ?? sale.total)}</dd></div>
+        </dl>
+        {sale.change !== null && (
+          <div className="mt-4 rounded-xl bg-emerald-50 py-4 dark:bg-emerald-950/40">
+            <p className="text-xs font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">Change</p>
+            <p className="mt-1 font-mono text-4xl font-bold text-emerald-700 dark:text-emerald-300" aria-live="polite">{money(sale.change)}</p>
+          </div>
+        )}
+        <button type="button" autoFocus onClick={() => onClose()} className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-blue-600 text-sm font-semibold text-white hover:bg-blue-700">Next sale <Kbd>Enter</Kbd></button>
+        <p className="mt-2 text-[11px] text-slate-400">Or just scan the next item.</p>
+      </section>
+    </div>
+  );
+}
+
+// Shown while the app starts and reads the store's data.
+function LoadingSkeleton() {
+  return (
+    <main aria-busy="true" aria-label="Loading your store" className="min-h-screen bg-[#f5f8fd] dark:bg-slate-950">
+      <div className="flex h-[72px] items-center gap-4 border-b border-slate-100 bg-white px-6 dark:border-slate-800 dark:bg-slate-900">
+        <div className="h-10 w-10 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-800" />
+        <div className="h-4 w-32 animate-pulse rounded bg-slate-200 dark:bg-slate-800" />
+        <div className="ml-auto h-9 w-40 animate-pulse rounded-xl bg-slate-200 dark:bg-slate-800" />
+      </div>
+      <div className="grid gap-5 p-6 md:grid-cols-[minmax(0,55fr)_minmax(0,45fr)]">
+        <div className="h-[70vh] animate-pulse rounded-2xl bg-white dark:bg-slate-900" />
+        <div className="space-y-3">
+          <div className="h-10 animate-pulse rounded-xl bg-white dark:bg-slate-900" />
+          {Array.from({ length: 6 }, (_, index) => <div key={index} className="h-14 animate-pulse rounded-xl bg-white dark:bg-slate-900" />)}
+        </div>
+      </div>
+      <p className="sr-only">Loading your store…</p>
+    </main>
+  );
+}
+
 function ConfirmDialog({ action, isWorking, onConfirm, onSecondary, onCancel }: { action: ConfirmAction; isWorking: boolean; onConfirm: () => void; onSecondary: () => void; onCancel: () => void }) {
   const neutral = action.tone === "neutral";
   return (
@@ -4040,7 +4197,7 @@ function QuickAddDialog({ initial, onAdd, onClose }: {
           <div><p className="text-xs font-semibold text-blue-600">CUSTOM ITEM</p><h2 id="quick-add-title" className="mt-1 text-xl font-semibold">Quick add</h2><p className="mt-1 text-sm text-slate-500">{initial.note ? `${initial.note} ` : ""}Sell it as a one-off item. Stock isn’t tracked for custom items.</p></div>
           <button type="button" aria-label="Close quick add (Esc)" onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-50"><X size={18} /></button>
         </div>
-        <form noValidate onSubmit={submit} className="space-y-4">
+        <form noValidate onSubmit={submit} onInput={(event) => { event.currentTarget.dataset.dirty = "1"; }} className="space-y-4">
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Description<input autoFocus={!initial.description} required maxLength={120} value={description} onChange={(event) => setDescription(event.currentTarget.value)} placeholder="e.g. Ice (1 bag)" className={inputClass} /></label>
           <div className="grid grid-cols-3 gap-3">
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300">Quantity<input required type="number" min="0.01" max="9999" step="0.01" inputMode="decimal" value={quantity} onChange={(event) => updateFrom({ quantity: event.currentTarget.value })} className={inputClass} /></label>
@@ -4370,9 +4527,19 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
   const matching = term
     ? products.filter((product) => product.name.toLowerCase().includes(term) || product.category.toLowerCase().includes(term) || (!!compactTerm && !!product.barcode?.toLowerCase().includes(compactTerm)))
     : products;
+  const [sort, setSort] = useState<{ key: "name" | "category" | "price" | "stock"; descending: boolean }>({ key: "name", descending: false });
+  const sorted = [...matching].sort((a, b) => {
+    const order = sort.key === "price" ? a.price - b.price : sort.key === "stock" ? a.stock - b.stock : a[sort.key].localeCompare(b[sort.key]);
+    return (sort.descending ? -order : order) || a.name.localeCompare(b.name);
+  });
+  const sortButton = (key: typeof sort.key, label: string) => (
+    <button type="button" onClick={() => setSort((current) => ({ key, descending: current.key === key ? !current.descending : false }))} className="inline-flex items-center gap-1 uppercase tracking-wider hover:text-slate-600" aria-label={`Sort by ${label}`}>
+      {label}{sort.key === key && <span aria-hidden="true">{sort.descending ? "↓" : "↑"}</span>}
+    </button>
+  );
   const pageCount = Math.max(1, Math.ceil(matching.length / INVENTORY_PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
-  const pageItems = matching.slice(currentPage * INVENTORY_PAGE_SIZE, (currentPage + 1) * INVENTORY_PAGE_SIZE);
+  const pageItems = sorted.slice(currentPage * INVENTORY_PAGE_SIZE, (currentPage + 1) * INVENTORY_PAGE_SIZE);
   return (
     <section>
       <div className="mb-6 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
@@ -4414,7 +4581,7 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4"><div><h2 className="text-sm font-semibold">All products</h2><p className="mt-1 text-xs text-slate-400">{products.length.toLocaleString("en-PH")} items in your catalog{term && <> · {matching.length.toLocaleString("en-PH")} match</>}</p></div><label className="flex h-9 w-full max-w-[260px] items-center gap-2 rounded-lg border border-slate-200 px-3 focus-within:border-blue-400 dark:border-slate-700"><Search size={14} className="shrink-0 text-slate-400" /><input value={query} onChange={(event) => { setQuery(event.currentTarget.value); setPage(0); }} placeholder="Search name, category or barcode" aria-label="Search products" className="w-full min-w-0 bg-transparent text-xs outline-none placeholder:text-slate-400" /></label></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3">Product</th><th className="px-4 py-3">Category</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3">Retail price</th><th className="px-4 py-3">Stock</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{pageItems.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
+        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-xs"><thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-3" aria-sort={sort.key === "name" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("name", "Product")}</th><th className="px-4 py-3" aria-sort={sort.key === "category" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("category", "Category")}</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3" aria-sort={sort.key === "price" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("price", "Retail price")}</th><th className="px-4 py-3" aria-sort={sort.key === "stock" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("stock", "Stock")}</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{pageItems.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
                 <DropdownMenu>
                   <DropdownMenuTrigger aria-label={`Actions for ${product.name}`} title="Actions" className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-300 data-[state=open]:bg-slate-100 data-[state=open]:text-slate-700 dark:hover:bg-slate-800 dark:data-[state=open]:bg-slate-800">
                     <EllipsisVertical size={16} />
