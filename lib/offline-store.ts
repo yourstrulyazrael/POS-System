@@ -6,6 +6,8 @@
 // - "cache": the last workspace loaded online (products, recent orders,
 //   stats) and signed-in profiles, so the POS can open and sell offline.
 
+import { isDemoMode } from "@/lib/demo";
+
 export type PendingOrderItem =
   | { kind: "product"; productId: string; name: string; quantity: number; unitPrice: number; wholesale?: boolean }
   | { kind: "custom"; description: string; quantity: number; unitPrice: number };
@@ -55,6 +57,8 @@ function openDb() {
 }
 
 async function run<T>(storeName: string, mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T> | void): Promise<T | undefined> {
+  // Demo mode keeps nothing on the device, and doesn't see the real store's data.
+  if (isDemoMode()) return undefined;
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(storeName, mode, mode === "readwrite" ? { durability: "strict" } : undefined);

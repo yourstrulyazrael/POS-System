@@ -64,7 +64,7 @@ export function DrawerStatusButton({ session, onOpen, onCount }: { session: Cash
   return (
     <button type="button" onClick={session ? onCount : onOpen} aria-label={label} title={label} className={`flex h-12 items-center gap-2 rounded-xl px-3 text-sm font-semibold transition ${session ? "text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40" : "text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-800"}`}>
       <Wallet size={24} />
-      <span className="hidden xl:inline">{session ? "Drawer open" : "Start shift"}</span>
+      <span className="hidden min-[1900px]:inline">{session ? "Drawer open" : "Start shift"}</span>
     </button>
   );
 }

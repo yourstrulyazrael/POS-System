@@ -13,7 +13,7 @@ import { AUTH_STORAGE_KEY } from "@/lib/supabase/client";
 
 const inputClass = "mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 text-sm outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-4 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-blue-950";
 
-export function ConnectStoreScreen({ current, onCancel }: { current: StoreConnection | null; onCancel?: () => void }) {
+export function ConnectStoreScreen({ current, onCancel, onTryDemo }: { current: StoreConnection | null; onCancel?: () => void; onTryDemo?: () => void }) {
   const [mode, setMode] = useState<"code" | "manual">("code");
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
@@ -124,6 +124,7 @@ export function ConnectStoreScreen({ current, onCancel }: { current: StoreConnec
           {onCancel && <button type="button" onClick={onCancel} className="h-10 w-full rounded-xl text-sm font-semibold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Cancel</button>}
         </form>
         <p className="mt-8 text-center text-xs leading-5 text-slate-400">Don’t have a store code? Ask whoever set up your POS service.</p>
+        {onTryDemo && <p className="mt-2 text-center text-xs text-slate-500">Just looking? <button type="button" onClick={onTryDemo} className="font-semibold text-blue-700 hover:text-blue-800 dark:text-blue-400">Try the demo</button>: a sample store where nothing is saved.</p>}
       </div>
     </main>
   );

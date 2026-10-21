@@ -58,6 +58,8 @@ import {
 } from "lucide-react";
 import { AUTH_STORAGE_KEY, callPosAdmin, createClient } from "@/lib/supabase/client";
 import { loadStoreConnection, projectRef, type StoreConnection } from "@/lib/store-connection";
+import { DEMO_USER_ID, endDemoMode, isDemoMode, startDemoMode } from "@/lib/demo";
+import { demoProducts, demoSales, demoStoreName } from "@/lib/demo-data";
 import { ConnectStoreScreen } from "@/components/connect-store";
 import { StoreName, StoreNameContext } from "@/components/store-name";
 import { headerButton, headerPrimaryButton, PageHeader, PageTitle, Sparkline } from "@/components/page-header";
@@ -228,6 +230,78 @@ function productAppearance(name: string, category: string, index: number, imageI
 type Workspace = Awaited<ReturnType<typeof fetchWorkspaceData>>;
 type CachedProfile = { role: Role; fullName: string; email: string };
 type StockShortfall = { id: string; productName: string; shortfall: number; createdAt: Date };
+
+// Demo mode: a sample store with a morning of sales, made fresh each time.
+function buildDemoWorkspace(): Workspace {
+  const products: Product[] = demoProducts.map((row, index) => ({
+    id: `de300000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+    name: row.name,
+    category: row.category,
+    costPrice: row.costPrice,
+    costPriceKnown: true,
+    wholesalePrice: row.wholesalePrice,
+    price: row.price,
+    stock: row.stock,
+    imageIcon: row.imageIcon ?? "auto",
+    imageUrl: null,
+    barcode: row.barcode,
+    ...productAppearance(row.name, row.category, index, row.imageIcon ?? "auto"),
+  }));
+  const now = Date.now();
+  const manilaToday = new Date(now + 8 * 3_600_000);
+  const midnight = Date.UTC(manilaToday.getUTCFullYear(), manilaToday.getUTCMonth(), manilaToday.getUTCDate()) - 8 * 3_600_000;
+  const day = `${String(manilaToday.getUTCMonth() + 1).padStart(2, "0")}${String(manilaToday.getUTCDate()).padStart(2, "0")}${String(manilaToday.getUTCFullYear()).slice(2)}`;
+  const orders: Order[] = demoSales.map(([hour, method, items], index): Order => {
+    // Earlier in the day than now, even when the demo starts early.
+    const createdAt = new Date(Math.min(midnight + hour * 3_600_000 + (index % 2) * 1_500_000, now - (demoSales.length - index) * 360_000));
+    const lines = items.map(([productIndex, quantity], line) => ({ id: `demo-${index}-${line}`, name: products[productIndex].name, quantity, unitPrice: products[productIndex].price, custom: false, refundedQuantity: 0, wholesale: false }));
+    const total = Math.round(lines.reduce((sum, line) => sum + lineAmount(line.unitPrice, line.quantity), 0) * 100) / 100;
+    const cashReceived = method === "cash" ? Math.ceil(total / 100) * 100 : null;
+    return {
+      id: `${day}-${String(index + 1).padStart(4, "0")}`,
+      fullId: `demo-order-${index + 1}`,
+      items: lines.reduce((sum, line) => sum + line.quantity, 0),
+      total,
+      time: createdAt.toLocaleTimeString("en-PH", { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" }),
+      createdAt,
+      lines,
+      paymentMethod: method,
+      paymentReferenceLast4: method === "cash" ? null : String(1000 + index * 137).slice(-4),
+      cashReceived,
+      changeDue: cashReceived === null ? null : Math.round((cashReceived - total) * 100) / 100,
+      employeeName: index % 3 === 0 ? "Maria Santos" : "Demo User",
+      isWholesale: false,
+      status: "completed",
+      refundedTotal: 0,
+      voidReason: null,
+    };
+  }).reverse();
+  const hours = new Map<number, SalesChartPoint>();
+  for (let hour = 6; hour <= Math.max(12, Number(new Intl.DateTimeFormat("en-US", { hour: "numeric", hourCycle: "h23", timeZone: "Asia/Manila" }).format(now))); hour += 1) {
+    hours.set(hour, { label: `${hour}:00`, cash: 0, eWallet: 0, card: 0 });
+  }
+  for (const order of orders) {
+    const point = hours.get(Number(new Intl.DateTimeFormat("en-US", { hour: "numeric", hourCycle: "h23", timeZone: "Asia/Manila" }).format(order.createdAt)));
+    if (!point) continue;
+    if (order.paymentMethod === "cash") point.cash += order.total;
+    else if (order.paymentMethod === "e_wallet") point.eWallet += order.total;
+    else point.card += order.total;
+  }
+  return {
+    products,
+    orders,
+    stats: {
+      sales_total: Math.round(orders.reduce((sum, order) => sum + order.total, 0) * 100) / 100,
+      orders_today: orders.length,
+      active_products: products.length,
+      units_in_stock: products.reduce((sum, product) => sum + product.stock, 0),
+      active_employees: 3,
+    },
+    salesChart: [...hours.values()],
+    shortfalls: [],
+    storeDetails: { ...defaultStoreDetails, storeName: demoStoreName, address: "Sample address · this is a demo", phone: "0900-000-0000", tin: "", receiptFooter: "Thank you for trying the demo!" },
+  };
+}
 
 // A sale waiting in the offline queue, shown alongside synced orders.
 function pendingToOrder(sale: PendingOrder): Order {
@@ -553,6 +627,10 @@ export default function Home() {
   // read from this device, null if it has never been connected.
   const [storeConnection, setStoreConnection] = useState<StoreConnection | null | undefined>(undefined);
   const [changingStore, setChangingStore] = useState(false);
+  // Demo mode (lib/demo.ts): sample data in this tab only; nothing is saved.
+  const [demoActive, setDemoActive] = useState(false);
+  const [demoAvailable, setDemoAvailable] = useState(false);
+  useEffect(() => { setDemoAvailable(!isDesktopApp()); }, []);
   const [role, setRole] = useState<Role>("employee");
   const [employeeName, setEmployeeName] = useState("");
   const [products, setProducts] = useState<Product[]>([]);
@@ -913,7 +991,7 @@ export default function Home() {
   }, []);
 
   const refreshWorkspace = useCallback(async (period = salesPeriod) => {
-    if (!userId || offlineSession) return; // no Supabase session yet
+    if (!userId || offlineSession || isDemoMode()) return; // no Supabase session (or the demo)
     const workspace = await fetchWorkspaceData(role === "admin", period);
     applyWorkspace(workspace, userId);
   }, [applyWorkspace, offlineSession, role, salesPeriod, userId]);
@@ -924,7 +1002,7 @@ export default function Home() {
   // failed (retried only on request). Employees sync their own sales; an
   // admin can sync everyone's queued on this computer.
   const syncPendingOrders = useCallback(async ({ retryFailed = false, quiet = false } = {}) => {
-    if (syncingRef.current || !userId || offlineSession || !navigator.onLine) return;
+    if (syncingRef.current || !userId || offlineSession || !navigator.onLine || isDemoMode()) return;
     syncingRef.current = true;
     setIsSyncing(true);
     let synced = 0;
@@ -1020,7 +1098,7 @@ export default function Home() {
   // copy, or sales are waiting: every 30 s (and right away when the device
   // reports a network), reload fresh data, then upload queued sales.
   const connected = isOnline && !serverUnreachable;
-  const needsReconnect = signedIn && !offlineSession && (serverUnreachable || usingCachedData || waitingToSync > 0 || sessionOutboxCount > 0);
+  const needsReconnect = signedIn && !offlineSession && !demoActive && (serverUnreachable || usingCachedData || waitingToSync > 0 || sessionOutboxCount > 0);
   useEffect(() => {
     if (!needsReconnect) return;
     const attempt = async () => {
@@ -1589,7 +1667,7 @@ export default function Home() {
   }, [signedIn]);
 
   useEffect(() => {
-    const storageKey = userId ? `clover-pos-cart:${userId}` : null;
+    const storageKey = userId && !isDemoMode() ? `clover-pos-cart:${userId}` : null;
     if (!storageKey || restoredCartFor.current === storageKey) return;
     restoredCartFor.current = storageKey;
     try {
@@ -1602,7 +1680,7 @@ export default function Home() {
     }
   }, [userId]);
   useEffect(() => {
-    const storageKey = userId ? `clover-pos-cart:${userId}` : null;
+    const storageKey = userId && !isDemoMode() ? `clover-pos-cart:${userId}` : null;
     if (!storageKey || restoredCartFor.current !== storageKey) return;
     try {
       if (Object.keys(cart).length || customItems.length) window.localStorage.setItem(storageKey, JSON.stringify({ cart, customItems, wholesaleMode }));
@@ -1693,6 +1771,11 @@ export default function Home() {
     };
     if (!userId) {
       setNotice("Your session isn’t ready yet. Sign out and sign in again.");
+      setIsLoading(false);
+      return;
+    }
+    if (isDemoMode()) {
+      completeDemoSale(sale);
       setIsLoading(false);
       return;
     }
@@ -2023,6 +2106,26 @@ export default function Home() {
 
   // Records a sale on this computer to sync later. The sale is on disk before
   // anything else changes; if saving fails, the cart is left as it was.
+  // Demo sale: shown in Orders and the dashboard for this visit only.
+  function completeDemoSale(sale: PendingOrder) {
+    const sequence = orders.filter((order) => order.fullId.startsWith("demo-sale-")).length + 1;
+    const receiptNumber = `DEMO-${String(sequence).padStart(4, "0")}`;
+    const order: Order = { ...pendingToOrder({ ...sale, receiptNumber }), fullId: `demo-sale-${sequence}`, syncStatus: undefined, syncError: null };
+    const sold = new Map<string, number>();
+    for (const item of sale.items) if (item.kind === "product") sold.set(item.productId, (sold.get(item.productId) ?? 0) + item.quantity);
+    const units = [...sold.values()].reduce((sum, quantity) => sum + quantity, 0);
+    setOrders((current) => [order, ...current]);
+    setProducts((current) => current.map((product) => (sold.has(product.id) ? { ...product, stock: Math.max(0, product.stock - (sold.get(product.id) ?? 0)) } : product)));
+    setDashboardStats((current) => (current ? { ...current, sales_total: Math.round((current.sales_total + sale.total) * 100) / 100, orders_today: current.orders_today + 1, units_in_stock: Math.max(0, current.units_in_stock - units) } : current));
+    if (printThisSale) void printReceipt(order, false);
+    clearOrder();
+    setShowCheckoutDialog(false);
+    setCashReceived("");
+    setPaymentReferenceLast4("");
+    setNotice(`Demo sale ${receiptNumber} completed. It isn’t saved anywhere.`);
+    setCompletedSale({ label: receiptNumber, total: sale.total, paid: sale.cashReceived, change: sale.cashReceived !== null ? Math.max(0, Math.round((sale.cashReceived - sale.total) * 100) / 100) : null, method: sale.paymentMethod, offline: false });
+  }
+
   async function saveSaleOffline(sale: PendingOrder, print: boolean) {
     try {
       await savePendingOrder(sale);
@@ -2048,11 +2151,31 @@ export default function Home() {
     void afterSale(sale, true, print);
   }
 
+  // "Try demo" (web version): a sample store in this tab, nothing saved.
+  function startDemo() {
+    startDemoMode();
+    setDemoActive(true);
+    setAuthError("");
+    setChangingStore(false);
+    setCart({});
+    setCustomItems([]);
+    setSuspendedOrders([]);
+    signInWith(DEMO_USER_ID, { role: "admin", fullName: "Demo User", email: "demo@example.com" }, buildDemoWorkspace(), false);
+    setOfflineSession(false);
+    setServerUnreachable(false);
+    setActivePage("dashboard");
+    setNotice("Welcome to the demo. Ring up sales, hold orders and look around; nothing you do here is saved.");
+  }
+
   async function signIn(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const email = String(formData.get("email") ?? "");
     const password = String(formData.get("password") ?? "");
+    if (demoAvailable && email.trim().toLowerCase() === "demo" && password === "demo") {
+      startDemo();
+      return;
+    }
     setAuthError("");
     setIsLoading(true);
     try {
@@ -2506,6 +2629,12 @@ export default function Home() {
   // Queued sales stay on this computer through a sign-out, but warn first:
   // offline, nobody can sign back in until the connection returns.
   function signOut() {
+    // Leaving the demo throws its data away: a fresh start, back to sign-in.
+    if (isDemoMode()) {
+      endDemoMode();
+      window.location.reload();
+      return;
+    }
     const unsynced = pendingOrders.filter((sale) => sale.employeeId === userId).length;
     if (isOnline && unsynced === 0) {
       void performSignOut();
@@ -2784,8 +2913,8 @@ export default function Home() {
     }
   }
 
-  if (!checkingAuth && storeConnection !== undefined && (!storeConnection || (changingStore && !signedIn))) {
-    return <ConnectStoreScreen current={storeConnection} onCancel={changingStore ? () => setChangingStore(false) : undefined} />;
+  if (!demoActive && !checkingAuth && storeConnection !== undefined && (!storeConnection || (changingStore && !signedIn))) {
+    return <ConnectStoreScreen current={storeConnection} onCancel={changingStore ? () => setChangingStore(false) : undefined} onTryDemo={demoAvailable ? startDemo : undefined} />;
   }
 
   if (checkingAuth) {
@@ -2852,7 +2981,8 @@ export default function Home() {
                   <input
                     required
                     autoFocus
-                    type="email"
+                    type={demoAvailable ? "text" : "email"}
+                    inputMode="email"
                     name="email"
                     autoComplete="username"
                     placeholder="you@yourstore.com"
@@ -2884,6 +3014,13 @@ export default function Home() {
                 <ShieldCheck size={16} className="mt-0.5 shrink-0" />
                 <span>You stay signed in on this computer until you sign out. Administrators create employee accounts from Employees.</span>
               </div>
+              {demoAvailable && (
+                <div className="mt-5 rounded-xl border border-dashed border-slate-300 p-4 text-center dark:border-slate-700">
+                  <p className="text-sm font-semibold">Just looking?</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">Explore a sample store, no account needed. Nothing you do in the demo is saved. (Or sign in as demo / demo.)</p>
+                  <button type="button" onClick={startDemo} className="mt-3 inline-flex h-11 items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-5 text-sm font-semibold text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/50 dark:text-blue-300">Try demo <ArrowRight size={16} /></button>
+                </div>
+              )}
               <p className="mt-5 text-center text-sm text-slate-500">Setting up a new store? <Link href="/setup-admin" className="font-semibold text-blue-700 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">Create the first admin</Link></p>
               <p className="mt-8 text-center text-xs text-slate-400">Secure checkout starts here · {brandName}{APP_VERSION && <> · v{APP_VERSION}</>}</p>
             </div>
@@ -2902,6 +3039,12 @@ export default function Home() {
       <div className="flex min-h-screen">
         <div className="min-w-0 flex-1">
           <header ref={headerRef} className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
+            {demoActive && (
+              <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 bg-violet-600 px-4 py-2 text-center text-sm font-semibold text-white">
+                <span>Demo mode · sample store. Nothing you do here is saved, and anything that would change the store is switched off.</span>
+                <button type="button" onClick={() => signOut()} className="rounded-lg bg-white/15 px-3 py-1 text-xs font-semibold hover:bg-white/25">Exit demo</button>
+              </div>
+            )}
             {updateStatus?.state === "ready" && <UpdateReadyBar version={updateStatus.version} busy={installingUpdate} onRestart={restartToUpdate} testFeed={updateStatus.testFeed} />}
             {offlineSession && isOnline && <ReconnectBanner email={accountEmail} onReconnect={reconnectOnline} />}
             {!connected && <OfflineBanner signedIn waiting={waitingToSync} />}
@@ -2909,15 +3052,15 @@ export default function Home() {
             <div className="shrink-0 xl:hidden"><Brand compact name={brandName} /></div>
             <div className="hidden shrink-0 xl:block"><Brand name={brandName} /></div>
             {/* Page icons; the name (and Alt+N shortcut) appears on hover or focus. */}
-            <nav aria-label="Workspace navigation" className="ml-2 hidden flex-1 items-center gap-1.5 md:flex xl:ml-8">
+            <nav aria-label="Workspace navigation" className="ml-2 hidden min-w-0 flex-1 items-center gap-1 md:flex xl:ml-6 xl:gap-1.5">
               {navItems.map((item, index) => <NavIcon key={item.page} icon={item.icon} label={item.label} shortcut={`Alt+${index + 1}`} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
             </nav>
-            <button type="button" onClick={() => { goToPage("pos"); window.setTimeout(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); }, 0); }} aria-keyshortcuts="Control+K" className="ml-auto hidden h-12 w-[320px] shrink-0 items-center gap-3 rounded-xl border border-slate-200 px-4 text-left text-base text-slate-400 transition hover:border-blue-200 dark:border-slate-700 xl:flex">
+            <button type="button" onClick={() => { goToPage("pos"); window.setTimeout(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); }, 0); }} aria-keyshortcuts="Control+K" className="ml-auto hidden h-12 w-[300px] shrink-0 items-center gap-3 rounded-xl border border-slate-200 px-4 text-left text-base min-[1600px]:flex text-slate-400 transition hover:border-blue-200 dark:border-slate-700">
               <Search size={20} className="shrink-0" /><span className="flex-1 truncate">Search products or scan…</span><kbd className="rounded border border-slate-200 px-1.5 py-0.5 font-mono text-[11px] text-slate-400 dark:border-slate-700">Ctrl K</kbd>
             </button>
-            <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-3 xl:ml-3">
+            <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2 min-[1700px]:ml-3 2xl:gap-3">
               <button type="button" aria-label="Open help center (F1)" title="Help (F1)" aria-keyshortcuts="F1" onClick={() => setShowHelpCenter(true)} className="grid h-12 w-12 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={25} /></button>
-              <div className="hidden items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5 text-sm font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300 lg:flex">
+              <div className="hidden items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5 text-sm font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300 min-[1900px]:flex">
                 <Clock3 size={17} className="text-slate-400" />
                 {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
               </div>
@@ -2940,7 +3083,7 @@ export default function Home() {
               <div className="hidden h-8 w-px bg-slate-100 dark:bg-slate-800 sm:block" />
               <div className="flex items-center gap-2.5">
                 <div className="grid h-11 w-11 place-items-center rounded-full bg-blue-100 text-sm font-bold text-blue-700">{employeeName.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div>
-                <div className="hidden xl:block">
+                <div className="hidden min-[1900px]:block">
                   <p className="text-sm font-semibold">{employeeName}</p>
                   <p className="mt-0.5 text-xs capitalize text-slate-400">{role}</p>
                 </div>
@@ -3410,9 +3553,9 @@ function NavIcon({ icon: Icon, label, shortcut, active, onClick }: { icon: Lucid
       aria-label={label}
       aria-current={active ? "page" : undefined}
       aria-keyshortcuts={shortcut}
-      className={`group relative grid h-11 w-11 shrink-0 place-items-center rounded-xl border transition md:h-14 md:w-14 md:rounded-2xl ${active ? "border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/60 dark:text-blue-300" : "border-transparent text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"}`}
+      className={`group relative grid h-11 w-11 shrink-0 place-items-center rounded-xl border transition xl:h-14 xl:w-14 xl:rounded-2xl ${active ? "border-blue-300 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/60 dark:text-blue-300" : "border-transparent text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"}`}
     >
-      <Icon size={28} className="h-6 w-6 md:h-7 md:w-7" strokeWidth={active ? 2.1 : 1.8} />
+      <Icon size={28} className="h-6 w-6 xl:h-7 xl:w-7" strokeWidth={active ? 2.1 : 1.8} />
       <span aria-hidden="true" className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 -translate-x-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-hover:delay-150 group-focus-visible:opacity-100 dark:bg-slate-700">
         {label}{shortcut && <span className="ml-1.5 text-slate-400">{shortcut}</span>}
       </span>
