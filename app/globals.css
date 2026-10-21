@@ -209,3 +209,10 @@ html.dark :where(a, button, input, select, textarea, summary, [tabindex]):focus-
     scroll-behavior: auto !important;
   }
 }
+
+/* Nothing may make the page wider than the screen (a phone would let the
+   page be zoomed out to show it). clip, unlike hidden, keeps sticky headers
+   working. */
+html, body {
+  overflow-x: clip;
+}

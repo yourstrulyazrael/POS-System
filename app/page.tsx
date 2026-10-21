@@ -18,6 +18,8 @@ import {
   Coffee,
   CreditCard,
   Banknote,
+  Menu,
+  Wallet,
   CirclePause,
   History,
   CircleHelp,
@@ -629,6 +631,8 @@ export default function Home() {
   const [changingStore, setChangingStore] = useState(false);
   // Demo mode (lib/demo.ts): sample data in this tab only; nothing is saved.
   const [demoActive, setDemoActive] = useState(false);
+  // Phones: the "More" sheet of the bottom tab bar.
+  const [showMoreSheet, setShowMoreSheet] = useState(false);
   const [demoAvailable, setDemoAvailable] = useState(false);
   useEffect(() => { setDemoAvailable(!isDesktopApp()); }, []);
   const [role, setRole] = useState<Role>("employee");
@@ -1467,6 +1471,7 @@ export default function Home() {
     else if (isLoading) return false;
     else if (showCheckoutDialog) { setShowCheckoutDialog(false); setNotice(""); }
     else if (completedSale) setCompletedSale(null);
+    else if (showMoreSheet) setShowMoreSheet(false);
     else if (showAddProduct) closeAddProduct();
     else if (editingProductPrices) closeEditPrices();
     else if (editingProductImage) { setEditingProductImage(null); setSelectedProductImage(null); setRemoveExistingProductImage(false); }
@@ -3041,14 +3046,14 @@ export default function Home() {
           <header ref={headerRef} className="sticky top-0 z-20 border-b border-slate-100 bg-white/95 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95">
             {demoActive && (
               <div role="status" className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 bg-violet-600 px-4 py-2 text-center text-sm font-semibold text-white">
-                <span>Demo mode · sample store. Nothing you do here is saved, and anything that would change the store is switched off.</span>
+                <span>Demo mode · sample store<span className="hidden sm:inline">. Nothing you do here is saved, and anything that would change the store is switched off</span>.</span>
                 <button type="button" onClick={() => signOut()} className="rounded-lg bg-white/15 px-3 py-1 text-xs font-semibold hover:bg-white/25">Exit demo</button>
               </div>
             )}
             {updateStatus?.state === "ready" && <UpdateReadyBar version={updateStatus.version} busy={installingUpdate} onRestart={restartToUpdate} testFeed={updateStatus.testFeed} />}
             {offlineSession && isOnline && <ReconnectBanner email={accountEmail} onReconnect={reconnectOnline} />}
             {!connected && <OfflineBanner signedIn waiting={waitingToSync} />}
-            <div className={`flex h-[88px] items-center gap-3 px-4 sm:px-8 ${currentView === "pos" ? "xl:px-9" : "xl:px-14"}`}>
+            <div className={`flex h-16 items-center gap-3 px-4 sm:px-8 md:h-[88px] ${currentView === "pos" ? "xl:px-9" : "xl:px-14"}`}>
             <div className="shrink-0 xl:hidden"><Brand compact name={brandName} /></div>
             <div className="hidden shrink-0 xl:block"><Brand name={brandName} /></div>
             {/* Page icons; the name (and Alt+N shortcut) appears on hover or focus. */}
@@ -3058,17 +3063,18 @@ export default function Home() {
             <button type="button" onClick={() => { goToPage("pos"); window.setTimeout(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); }, 0); }} aria-keyshortcuts="Control+K" className="ml-auto hidden h-12 w-[300px] shrink-0 items-center gap-3 rounded-xl border border-slate-200 px-4 text-left text-base min-[1600px]:flex text-slate-400 transition hover:border-blue-200 dark:border-slate-700">
               <Search size={20} className="shrink-0" /><span className="flex-1 truncate">Search products or scan…</span><kbd className="rounded border border-slate-200 px-1.5 py-0.5 font-mono text-[11px] text-slate-400 dark:border-slate-700">Ctrl K</kbd>
             </button>
-            <div className="ml-auto flex shrink-0 items-center gap-1.5 sm:gap-2 min-[1700px]:ml-3 2xl:gap-3">
-              <button type="button" aria-label="Open help center (F1)" title="Help (F1)" aria-keyshortcuts="F1" onClick={() => setShowHelpCenter(true)} className="grid h-12 w-12 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={25} /></button>
+            <div className="ml-auto flex shrink-0 items-center gap-1 sm:gap-2 min-[1700px]:ml-3 2xl:gap-3">
+              <button type="button" onClick={() => { goToPage("pos"); window.setTimeout(() => { searchInputRef.current?.focus(); searchInputRef.current?.select(); }, 0); }} aria-label="Search products" className="grid h-10 w-10 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800 md:hidden"><Search size={22} /></button>
+              <button type="button" aria-label="Open help center (F1)" title="Help (F1)" aria-keyshortcuts="F1" onClick={() => setShowHelpCenter(true)} className="hidden h-12 w-12 place-items-center rounded-xl md:grid text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800"><CircleHelp size={25} /></button>
               <div className="hidden items-center gap-2 rounded-xl bg-slate-50 px-3.5 py-2.5 text-sm font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300 min-[1900px]:flex">
                 <Clock3 size={17} className="text-slate-400" />
                 {new Date().toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric", timeZone: "Asia/Manila" })}
               </div>
-              <DrawerStatusButton session={cashSession} onOpen={() => setShowOpenDrawer(true)} onCount={() => setShowCashCount(true)} />
+              <div className="hidden md:block"><DrawerStatusButton session={cashSession} onOpen={() => setShowOpenDrawer(true)} onCount={() => setShowCashCount(true)} /></div>
               <SyncStatusButton isOnline={connected} isSyncing={isSyncing} waiting={waitingToSync} failed={failedToSync} onClick={() => setShowSyncPanel(true)} />
               <div className="relative">
-                <button type="button" aria-label="Notifications" aria-expanded={showNotifications} onClick={() => setShowNotifications((current) => !current)} className="relative grid h-12 w-12 place-items-center rounded-xl text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800">
-                  <Bell size={25} />
+                <button type="button" aria-label="Notifications" aria-expanded={showNotifications} onClick={() => setShowNotifications((current) => !current)} className="relative grid h-10 w-10 place-items-center rounded-xl md:h-12 md:w-12 text-slate-500 transition hover:bg-slate-50 dark:hover:bg-slate-800">
+                  <Bell size={25} className="h-[22px] w-[22px] md:h-[25px] md:w-[25px]" />
                   {unreadNotificationCount > 0 && <span className="absolute -right-0.5 -top-0.5 grid min-h-4 min-w-4 place-items-center rounded-full bg-red-500 px-1 text-[9px] font-bold text-white ring-2 ring-white dark:ring-slate-900">{unreadNotificationCount > 9 ? "9+" : unreadNotificationCount}</span>}
                 </button>
                 {showNotifications && <div className="absolute right-0 top-14 z-50 w-[min(340px,calc(100vw-32px))] overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-900">
@@ -3081,20 +3087,16 @@ export default function Home() {
               </div>
               <ThemeSwitcher />
               <div className="hidden h-8 w-px bg-slate-100 dark:bg-slate-800 sm:block" />
-              <div className="flex items-center gap-2.5">
-                <div className="grid h-11 w-11 place-items-center rounded-full bg-blue-100 text-sm font-bold text-blue-700">{employeeName.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div>
+              <div className="flex items-center gap-1.5 md:gap-2.5">
+                <div className="hidden h-9 w-9 place-items-center rounded-full bg-blue-100 text-xs font-bold text-blue-700 min-[360px]:grid md:h-11 md:w-11 md:text-sm">{employeeName.split(" ").map((part) => part[0]).join("").slice(0, 2)}</div>
                 <div className="hidden min-[1900px]:block">
                   <p className="text-sm font-semibold">{employeeName}</p>
                   <p className="mt-0.5 text-xs capitalize text-slate-400">{role}</p>
                 </div>
-                <button type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()} className="rounded-xl p-2.5 text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800"><LogOut size={22} /></button>
+                <button type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()} className="rounded-xl p-2 text-slate-400 hover:bg-slate-50 hover:text-slate-700 dark:hover:bg-slate-800 md:p-2.5"><LogOut size={22} /></button>
               </div>
             </div>
             </div>
-            {/* Phones: the same icons on a second row of the sticky header. */}
-            <nav aria-label="Workspace navigation" className="flex justify-around gap-1 overflow-x-auto border-t border-slate-100 px-2 py-1.5 dark:border-slate-800 md:hidden">
-              {navItems.map((item) => <NavIcon key={item.page} icon={item.icon} label={item.label} active={currentView === item.page} onClick={() => goToPage(item.page)} />)}
-            </nav>
           </header>
 
           <div className={currentView === "pos" ? "p-4 sm:p-7 xl:p-9" : "px-4 py-7 sm:px-8 sm:py-9 xl:px-14 xl:py-11"}>
@@ -3214,7 +3216,7 @@ export default function Home() {
             ) : currentView === "shifts" ? (
               <ShiftHistoryView isAdmin={isAdmin} />
             ) : (
-              <div ref={posGridRef} className="grid items-start gap-5 pb-20 md:grid-cols-[var(--pos-columns)] md:pb-0 xl:gap-6" style={{ "--pos-columns": posLayout.cartSide === "left" ? `minmax(0,${posLayout.cartShare}fr) minmax(0,${100 - posLayout.cartShare}fr)` : `minmax(0,${100 - posLayout.cartShare}fr) minmax(0,${posLayout.cartShare}fr)` } as CSSProperties}>
+              <div ref={posGridRef} className="grid items-start gap-5 pb-24 md:grid-cols-[var(--pos-columns)] md:pb-0 xl:gap-6" style={{ "--pos-columns": posLayout.cartSide === "left" ? `minmax(0,${posLayout.cartShare}fr) minmax(0,${100 - posLayout.cartShare}fr)` : `minmax(0,${100 - posLayout.cartShare}fr) minmax(0,${posLayout.cartShare}fr)` } as CSSProperties}>
                 {/* Current order: on the left by default (Customize or F10 in the
                     desktop app swaps sides), and the larger side.
                     Phones: a drawer that slides in from the right.
@@ -3360,7 +3362,7 @@ export default function Home() {
                   )}
                 </section>
 
-                <div className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-100 bg-white/95 px-4 py-3 shadow-[0_-4px_16px_rgba(20,45,90,0.06)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/95 md:hidden">
+                <div className="fixed inset-x-0 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-30 px-4 pb-2 md:hidden">
                   <button type="button" aria-controls="cart-panel" aria-expanded={showMobileCart} onClick={() => setShowMobileCart(true)} className="flex h-12 w-full items-center gap-3 rounded-xl bg-blue-600 px-4 text-sm font-semibold text-white shadow-lg shadow-blue-600/20">
                     <span className="relative"><ShoppingCart size={19} />{itemCount > 0 && <span className="absolute -right-2 -top-2 grid min-h-4 min-w-4 place-items-center rounded-full bg-white px-1 text-[9px] font-bold text-blue-700">{itemCount > 99 ? "99+" : itemCount}</span>}</span>
                     <span className="flex-1 text-left">{itemCount ? "View order" : "Order is empty"}{wholesaleMode && <span className="ml-2 rounded-full bg-white/20 px-2 py-0.5 text-[10px]">Wholesale mode</span>}</span>
@@ -3370,7 +3372,7 @@ export default function Home() {
               </div>
             )}
           </div>
-          <footer className="px-4 pb-6 text-center text-[10px] text-slate-400 sm:px-7 xl:px-9">{brandName} · Point of sale{APP_VERSION && <> · v{APP_VERSION}</>}</footer>
+          <footer className="px-4 pb-28 text-center text-[10px] text-slate-400 sm:px-7 md:pb-6 xl:px-9">{brandName} · Point of sale{APP_VERSION && <> · v{APP_VERSION}</>}</footer>
         </div>
       </div>
 
@@ -3488,6 +3490,25 @@ export default function Home() {
           </div>
         </div>
       )}
+      {signedIn && <MobileTabBar
+        items={navItems}
+        currentPage={currentView}
+        isAdmin={isAdmin}
+        onNavigate={(page) => { setShowMoreSheet(false); goToPage(page); }}
+        onNewSale={() => { setShowMoreSheet(false); goToPage("pos"); window.setTimeout(() => searchInputRef.current?.focus(), 0); }}
+        moreOpen={showMoreSheet}
+        onMore={() => setShowMoreSheet((current) => !current)}
+      />}
+      {showMoreSheet && <MobileMoreSheet
+        items={navItems}
+        isAdmin={isAdmin}
+        currentPage={currentView}
+        drawerLabel={cashSession ? "Count drawer & end shift" : "Start shift"}
+        onNavigate={(page) => { setShowMoreSheet(false); goToPage(page); }}
+        onHelp={() => { setShowMoreSheet(false); setShowHelpCenter(true); }}
+        onDrawer={() => { setShowMoreSheet(false); if (cashSession) setShowCashCount(true); else setShowOpenDrawer(true); }}
+        onClose={() => setShowMoreSheet(false)}
+      />}
       {completedSale && <SaleCompleteDialog sale={completedSale} onClose={(typed) => {
         setCompletedSale(null);
         // Typing or scanning straight away starts the next sale.
@@ -3757,7 +3778,7 @@ function SalesChartView({ rows, period }: { rows: SalesChartPoint[]; period: Sal
         <div><h2 className="text-xl font-semibold">Sales by payment method</h2><p className="mt-1 text-[15px] text-slate-500">{periodLabel(period)} · PHP</p></div>
         <div className="flex gap-1 rounded-lg bg-slate-50 p-1" aria-label="Filter sales chart by payment method">
           {(["all", "cash", "e_wallet", "card"] as const).map((method) => (
-            <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-lg px-3.5 py-2 text-sm font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
+            <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`shrink-0 whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
               {method === "all" ? "All" : paymentMethodLabel(method)}
             </button>
           ))}
@@ -4046,6 +4067,82 @@ function SyncPanel({ sales, isOnline, isSyncing, currentUserId, isAdmin, onSync,
 
 // Confirmation for destructive actions. Cancel has focus first, so a stray
 // Enter never deletes anything; Esc cancels.
+// ---------- Phones: bottom tab bar ----------
+
+type NavItem = { page: Page; label: string; icon: LucideIcon };
+const mobileTabPages = (isAdmin: boolean): Page[] => (isAdmin ? ["dashboard", "inventory", "orders"] : ["orders", "shifts", "account"]);
+const mobileLabel = (item: NavItem) => (item.page === "dashboard" ? "Overview" : item.page === "analytics" ? "Reports" : item.label);
+
+// Two tabs, a round "new sale" button, a tab and More; phones only.
+function MobileTabBar({ items, currentPage, isAdmin, onNavigate, onNewSale, moreOpen, onMore }: {
+  items: NavItem[];
+  currentPage: Page;
+  isAdmin: boolean;
+  onNavigate: (page: Page) => void;
+  onNewSale: () => void;
+  moreOpen: boolean;
+  onMore: () => void;
+}) {
+  const tabs = mobileTabPages(isAdmin).map((page) => items.find((item) => item.page === page)).filter((item): item is NavItem => !!item);
+  const inMore = !tabs.some((item) => item.page === currentPage) && currentPage !== "pos";
+  const tab = (item: NavItem) => {
+    const active = currentPage === item.page;
+    const Icon = item.icon;
+    return (
+      <button key={item.page} type="button" aria-current={active ? "page" : undefined} onClick={() => onNavigate(item.page)} className={`relative flex flex-col items-center justify-center gap-1 text-[11px] font-semibold ${active ? "text-blue-600 dark:text-blue-400" : "text-slate-500 dark:text-slate-400"}`}>
+        {active && <span aria-hidden="true" className="absolute top-0 h-0.5 w-10 rounded-full bg-blue-600 dark:bg-blue-400" />}
+        <Icon size={24} strokeWidth={active ? 2.1 : 1.8} />{mobileLabel(item)}
+      </button>
+    );
+  };
+  return (
+    <nav aria-label="Pages" className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/95 md:hidden">
+      <div className="grid h-[4.5rem] grid-cols-5">
+        {tabs.slice(0, 2).map(tab)}
+        <div className="relative flex justify-center">
+          <button type="button" aria-label="New sale" onClick={onNewSale} className="absolute -top-6 grid h-16 w-16 place-items-center rounded-full bg-blue-600 text-white shadow-lg shadow-blue-600/30 ring-4 ring-white transition active:scale-95 dark:ring-slate-900"><Plus size={30} strokeWidth={2.2} /></button>
+        </div>
+        {tabs.slice(2).map(tab)}
+        <button type="button" aria-label="More pages" aria-expanded={moreOpen} onClick={onMore} className={`relative flex flex-col items-center justify-center gap-1 text-[11px] font-semibold ${moreOpen || inMore ? "text-blue-600 dark:text-blue-400" : "text-slate-500 dark:text-slate-400"}`}>
+          {inMore && <span aria-hidden="true" className="absolute top-0 h-0.5 w-10 rounded-full bg-blue-600 dark:bg-blue-400" />}
+          <Menu size={24} />More
+        </button>
+      </div>
+    </nav>
+  );
+}
+
+// The pages and tools that don't fit in the tab bar.
+function MobileMoreSheet({ items, isAdmin, currentPage, drawerLabel, onNavigate, onHelp, onDrawer, onClose }: {
+  items: NavItem[];
+  isAdmin: boolean;
+  currentPage: Page;
+  drawerLabel: string;
+  onNavigate: (page: Page) => void;
+  onHelp: () => void;
+  onDrawer: () => void;
+  onClose: () => void;
+}) {
+  const tabs = mobileTabPages(isAdmin);
+  const rest = items.filter((item) => !tabs.includes(item.page));
+  const tile = "flex flex-col items-center justify-center gap-2 rounded-2xl border border-slate-100 bg-slate-50 px-2 py-4 text-xs font-semibold text-slate-700 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-200";
+  return (
+    <div className="fixed inset-0 z-30 bg-slate-950/40 md:hidden" onClick={onClose}>
+      <section role="dialog" aria-modal="true" aria-label="More pages" onClick={(event) => event.stopPropagation()} className="absolute inset-x-0 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] rounded-t-3xl bg-white p-5 shadow-2xl dark:bg-slate-900">
+        <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-slate-200 dark:bg-slate-700" />
+        <div className="grid grid-cols-3 gap-3">
+          {rest.map((item) => {
+            const Icon = item.icon;
+            return <button key={item.page} type="button" aria-current={currentPage === item.page ? "page" : undefined} onClick={() => onNavigate(item.page)} className={`${tile} ${currentPage === item.page ? "border-blue-300 text-blue-700 dark:border-blue-800 dark:text-blue-300" : ""}`}><Icon size={24} />{mobileLabel(item)}</button>;
+          })}
+          <button type="button" onClick={onDrawer} className={tile}><Wallet size={24} />{drawerLabel}</button>
+          <button type="button" onClick={onHelp} className={tile}><CircleHelp size={24} />Help</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 // After a sale: the change to hand back, large. Enter, Esc or a click closes
 // it; typing or scanning closes it and starts the next sale.
 function SaleCompleteDialog({ sale, onClose }: {
@@ -4819,7 +4916,7 @@ function InventoryView({ products, shortfalls, onResolveShortfalls, onAdd, onEdi
       </div>
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white">
         <div className="flex items-center justify-between gap-4 border-b border-slate-100 px-7 py-5 dark:border-slate-800"><div><h2 className="text-xl font-semibold">All products</h2><p className="mt-1 text-[15px] text-slate-500">{products.length.toLocaleString("en-PH")} items in your catalog{term && <> · {matching.length.toLocaleString("en-PH")} match</>}</p></div><label className="flex h-11 w-full max-w-[320px] items-center gap-2.5 rounded-xl border border-slate-200 px-4 focus-within:border-blue-400 dark:border-slate-700"><Search size={14} className="shrink-0 text-slate-400" /><input value={query} onChange={(event) => { setQuery(event.currentTarget.value); setPage(0); }} placeholder="Search name, category or barcode" aria-label="Search products" className="w-full min-w-0 bg-transparent text-[15px] outline-none placeholder:text-slate-400" /></label></div>
-        <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-sm"><thead className="bg-slate-50/70 text-xs font-semibold uppercase tracking-wider text-slate-400 dark:bg-slate-800/60"><tr><th className="px-5 py-3" aria-sort={sort.key === "name" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("name", "Product")}</th><th className="px-4 py-3" aria-sort={sort.key === "category" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("category", "Category")}</th><th className="px-4 py-3">Cost price</th><th className="px-4 py-3">Wholesale price</th><th className="px-4 py-3" aria-sort={sort.key === "price" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("price", "Retail price")}</th><th className="px-4 py-3" aria-sort={sort.key === "stock" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("stock", "Stock")}</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{pageItems.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="px-4 py-3.5 text-slate-500">{product.category}</td><td className="px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
+        <div className="overflow-x-auto"><table className="w-full text-left text-sm md:min-w-[760px]"><thead className="bg-slate-50/70 text-xs font-semibold uppercase tracking-wider text-slate-400 dark:bg-slate-800/60"><tr><th className="px-5 py-3" aria-sort={sort.key === "name" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("name", "Product")}</th><th className="hidden px-4 py-3 md:table-cell" aria-sort={sort.key === "category" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("category", "Category")}</th><th className="hidden px-4 py-3 md:table-cell">Cost price</th><th className="hidden px-4 py-3 md:table-cell">Wholesale price</th><th className="hidden px-4 py-3 md:table-cell" aria-sort={sort.key === "price" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("price", "Retail price")}</th><th className="px-4 py-3" aria-sort={sort.key === "stock" ? (sort.descending ? "descending" : "ascending") : undefined}>{sortButton("stock", "Stock")}</th><th className="px-5 py-3 text-right">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{pageItems.map((product) => <tr key={product.id} className="hover:bg-slate-50/50"><td className="px-5 py-3.5"><div className="flex items-center gap-3"><ProductArtwork product={product} className="h-9 w-9 rounded-lg text-lg" /><span><span className="block font-semibold text-slate-700">{product.name}</span><span className="block text-xs text-slate-500 md:hidden"><span className="font-mono">{money(product.price)}</span> · {product.category}</span>{product.barcode && <span className="mt-0.5 flex items-center gap-1 font-mono text-[10px] text-slate-400"><ScanBarcode size={11} />{product.barcode}</span>}</span></div></td><td className="hidden md:table-cell px-4 py-3.5 text-slate-500">{product.category}</td><td className="hidden md:table-cell px-4 py-3.5 font-mono">{product.costPriceKnown ? money(product.costPrice) : <span className="text-amber-600">Not set</span>}</td><td className="hidden md:table-cell px-4 py-3.5 font-mono">{product.wholesalePrice > 0 ? money(product.wholesalePrice) : <span className="text-slate-400" title="Not sold wholesale">—</span>}</td><td className="hidden md:table-cell px-4 py-3.5 font-mono font-semibold">{money(product.price)}</td><td className="px-4 py-3.5"><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${product.stock < 10 ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700"}`}><span className="font-mono">{product.stock}</span> in stock</span></td><td className="px-5 py-3.5 text-right"><div className="inline-flex items-center gap-1">
                 <DropdownMenu>
                   <DropdownMenuTrigger aria-label={`Actions for ${product.name}`} title="Actions" className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 outline-none hover:bg-slate-100 hover:text-slate-700 focus-visible:ring-2 focus-visible:ring-blue-300 data-[state=open]:bg-slate-100 data-[state=open]:text-slate-700 dark:hover:bg-slate-800 dark:data-[state=open]:bg-slate-800">
                     <EllipsisVertical size={16} />
@@ -4979,25 +5076,25 @@ function OrdersView({ orders, isAdmin, userName, connected, onPrint, onVoid, onR
       <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white dark:border-slate-800 dark:bg-slate-900">
         <div className="flex flex-col justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800 sm:flex-row sm:items-center">
           <div><h2 className="text-xl font-semibold">Order history</h2><p className="mt-1 text-[15px] text-slate-500">Showing {visibleOrders.length} of {orders.length} recent transactions</p></div>
-          <div className="flex gap-1 rounded-lg bg-slate-50 p-1 dark:bg-slate-800" aria-label="Filter orders by payment method">
-            {(["all", "cash", "e_wallet", "card"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`rounded-lg px-3.5 py-2 text-sm font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm dark:bg-slate-700 dark:text-blue-300" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : paymentMethodLabel(method)}</button>)}
+          <div className="flex gap-1 overflow-x-auto rounded-lg bg-slate-50 p-1 [scrollbar-width:none] dark:bg-slate-800" aria-label="Filter orders by payment method">
+            {(["all", "cash", "e_wallet", "card"] as const).map((method) => <button key={method} type="button" aria-pressed={paymentFilter === method} onClick={() => setPaymentFilter(method)} className={`shrink-0 whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-semibold capitalize ${paymentFilter === method ? "bg-white text-blue-700 shadow-sm dark:bg-slate-700 dark:text-blue-300" : "text-slate-500 hover:text-slate-700"}`}>{method === "all" ? "All payments" : paymentMethodLabel(method)}</button>)}
           </div>
         </div>
         {visibleOrders.length > 0 ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-sm">
+            <table className="w-full text-left text-sm md:min-w-[720px]">
               <thead className="bg-slate-50/70 text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:bg-slate-800/60">
-                <tr><th className="px-5 py-3">Status</th><th className="px-4 py-3">Date &amp; Time</th><th className="px-4 py-3">Cashier</th><th className="px-4 py-3">Payment Method</th><th className="px-4 py-3 text-right">Total</th><th className="px-5 py-3 text-right">Actions</th></tr>
+                <tr><th className="px-5 py-3">Status</th><th className="hidden px-4 py-3 md:table-cell">Date &amp; Time</th><th className="hidden px-4 py-3 md:table-cell">Cashier</th><th className="hidden px-4 py-3 md:table-cell">Payment Method</th><th className="px-4 py-3 text-right">Total</th><th className="px-5 py-3 text-right">Actions</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                 {visibleOrders.map((order) => {
                   const { date, time } = orderDateTime(order.createdAt);
                   return (
                     <tr key={order.fullId} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/40">
-                      <td className="px-5 py-3.5"><OrderStatusBadge order={order} /><p className="mt-1.5 font-mono text-[10px] text-slate-400">{order.id}</p></td>
-                      <td className="px-4 py-3.5"><p className="font-medium text-slate-700 dark:text-slate-200">{date}</p><p className="mt-0.5 text-[11px] text-slate-400">{time}</p></td>
-                      <td className="px-4 py-3.5 font-medium text-slate-700 dark:text-slate-200">{order.employeeName}</td>
-                      <td className="px-4 py-3.5"><p className="font-medium text-slate-700 dark:text-slate-200">{paymentMethodLabel(order.paymentMethod)}{order.isWholesale && <span className="ml-2 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Wholesale</span>}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.paymentReferenceLast4 ? `Ref •••• ${order.paymentReferenceLast4}` : order.cashReceived !== null ? `Change ${money(order.changeDue ?? 0)}` : ""}</p></td>
+                      <td className="px-5 py-3.5"><OrderStatusBadge order={order} /><p className="mt-1.5 font-mono text-[10px] text-slate-400">{order.id}</p><p className="mt-1 text-xs text-slate-500 md:hidden">{date} · {time} · {paymentMethodLabel(order.paymentMethod)}</p></td>
+                      <td className="hidden px-4 py-3.5 md:table-cell"><p className="font-medium text-slate-700 dark:text-slate-200">{date}</p><p className="mt-0.5 text-[11px] text-slate-400">{time}</p></td>
+                      <td className="hidden px-4 py-3.5 font-medium text-slate-700 dark:text-slate-200 md:table-cell">{order.employeeName}</td>
+                      <td className="hidden px-4 py-3.5 md:table-cell"><p className="font-medium text-slate-700 dark:text-slate-200">{paymentMethodLabel(order.paymentMethod)}{order.isWholesale && <span className="ml-2 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">Wholesale</span>}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.paymentReferenceLast4 ? `Ref •••• ${order.paymentReferenceLast4}` : order.cashReceived !== null ? `Change ${money(order.changeDue ?? 0)}` : ""}</p></td>
                       <td className="px-4 py-3.5 text-right"><p className="font-mono text-sm font-semibold">{money(order.total)}</p><p className="mt-0.5 text-[11px] text-slate-400">{order.items} item{order.items === 1 ? "" : "s"}</p></td>
                       <td className="px-5 py-3.5 text-right">
                         <DropdownMenu>
